@@ -1,4 +1,4 @@
-![image](https://github.com/user-attachments/assets/95385f0a-9a6c-4b05-8c80-30da722953a9)# 3DeepVOG
+# 3DeepVOG (Code will be released after paper is accepted) 
 
 **Deep learning-based 3D monocular eye tracking (horizontal, vertical, torsional)**  
 Accurate, real-time open-source eye movement analysis for clinical and research applications.
@@ -23,7 +23,7 @@ Accurate, real-time open-source eye movement analysis for clinical and research 
 ✅ Deep learning-based segmentation of pupil & iris  
 ✅ Real-time processing (>300 fps)  
 ✅ Robust to low-light & noisy video  
-✅ Validated against clinical gold-standard VOG system  
+✅ Validated against the clinical gold-standard VOG system  
 ✅ Open-source & extensible  
 
 ---
@@ -47,7 +47,8 @@ Accurate, real-time open-source eye movement analysis for clinical and research 
 ## Installation
 
 ```bash
-git clone https://github.com/yourusername/3DeepVOG.git
+git clone https://github.com/DSGZ-MotionLab/3DeepVOG.git
+
 cd 3DeepVOG
 # create environment (example using conda)
 conda create -n 3deepvog python=3.11
