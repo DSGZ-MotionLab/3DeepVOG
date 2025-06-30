@@ -1,9 +1,10 @@
-# 3DeepVOG (Code will be released after paper is accepted) 
+# 3DeepVOG (In preparation) 
 
 **Deep learning-based 3D monocular eye tracking (horizontal, vertical, torsional)**  
 Accurate, real-time open-source eye movement analysis for clinical and research applications.
 
 ---
+![sample_video](https://github.com/user-attachments/assets/058c96f5-45cc-4ed4-9abb-4e88ce0789ff)
 
 ## Paper Abstract
 
