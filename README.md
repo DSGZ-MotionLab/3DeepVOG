@@ -63,7 +63,7 @@ python run_demo.py --input_video myvideo.mp4 --output_dir results/
 ```
 
 ## License
-This project is licensed under the MIT License.
+This project is licensed under the Apache License Version 2.0.
 
 ## Acknowledgements
 Developed at LMU Klinikum
