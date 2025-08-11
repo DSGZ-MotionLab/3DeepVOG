@@ -4,7 +4,7 @@
 Accurate, real-time open-source eye movement analysis for clinical and research applications.
 
 ---
-![sample_video](https://github.com/user-attachments/assets/058c96f5-45cc-4ed4-9abb-4e88ce0789ff)
+![Gaze demo](gaze_combined_with_3Deye.gif)
 
 ## Paper Abstract
 
