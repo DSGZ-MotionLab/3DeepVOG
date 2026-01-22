@@ -32,7 +32,12 @@ if __name__ == '__main__':
     args = {
         # 'fit_vid': XXXX,   #comment out: use pred_vid for fitting eyeball model
         # 'pred_vid': r"D:\jzhao\DeepVOG-project\datasets\Patientrecording\sub3\trial.avi",
-        'pred_vid': r"D:\jzhao\DeepVOG-project\video_test\test_cornea_el_fitting\ES_gaze_jzhao_v3.mp4",
+        # 'pred_vid': r"D:\jzhao\DeepVOG-project\video_test\from_Julian\GutesVideo\GutesVideo.mp4",
+        # 'pred_vid': r"D:\jzhao\DeepVOG-project\video_test\from_Julian\schlechteLichtverhältnisse_Blinks\schlechteLichtverhältnisse_Blinks.mp4",
+        # 'pred_vid': r"D:\jzhao\DeepVOG-project\video_test\from_Julian\SchwierigeresVideo\SchwierigeresVideo.mp4",
+        'pred_vid': r"D:\jzhao\DeepVOG-project\video_test\from_Julian\Wimpern_Blinks\Wimpern_Blinks.mp4",
+        # 'pred_vid': r"D:\jzhao\DeepVOG-project\datasets\Gaze_EyeSeeCam\dataset2024\ekierig\trial.mp4",
+        # 'pred_vid': r"D:\jzhao\DeepVOG-project\video_test\test_cornea_el_fitting\ES_gaze_jzhao_v3.mp4",
         # 'pred_vid': r"D:\jzhao\DeepVOG-project\video_test\segmentation_fMRI_VOG\test_fMRI_VOG.mp4",
         # 'pred_vid': r"D:\jzhao\DeepVOG-project\video_test\TEyeD\GW_21_5\GW_21_5.mp4",
         # 'pred_vid': r"D:\jzhao\DeepVOG-project\video_test\from_ZUMUTU\MVS_SMP_test-Left.avi",
@@ -41,18 +46,19 @@ if __name__ == '__main__':
         # 'batch_size': 32,   #batch size for processing frames
         'device': 'cuda',   #comment out: use default device, e.g. 'cuda', 'mps', 'cpu'
         'model_frozen': True,  
-        # 'segmentation_model': xxx,   #e.g. 'SegResNet_3in3out'
-        # 'segmentation_model_weights_path': xxx,  #TODO:  e.g. 'SegResNet_3in3out'
+        'segmentation_model': 'SegFormerB0_3in3out',   #e.g. 'SegResNet_3in3out'
+        'segmentation_model_weights_path': r"D:\jzhao\DeepVOG-project\3DeepVOG\threedeepvog\models\SegFormer_weights.pth",
         # # 'max_frame': 1000,  # comment out: default is all frames
         'eyeball_model': 'PL', #simple or LeGrand or PL
         # 'extract_segment_map': False,  #"all", "sclera", "False"
 
-        'connected_components': 'morph',   #False / None / 'morph' / 'largest'
+        'connected_components': 'largest',   #False / None / 'morph' / 'largest'
         # 'torsion_collecte_detail': False,
-        'focal_length': 16.0,  # mm
+        'focal_length': 6.0,  # mm
         # 'sensor_size': (4.8, 3.6),  # mm
         'gaze_tracking_flag': True,
         'torsion_tracking_flag': True,
+        # 'torsion_geometric_correction_type': '3D',   # '2D' / 'polish_2D' / '3D'
         'seg_video_flag': True,
         'fit_video_flag': True,
         'write_seg_video_type': 'processed',   # 'processed', 'raw'

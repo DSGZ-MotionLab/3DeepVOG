@@ -33,7 +33,6 @@ class EllipseFitting(threading.Thread):
         self.blink_threshold = args.get('blink_threshold', 0.735)
         self.frame_counter = 0
         self.elapsed_time = 0
-        
         # self.skimg_EllipseModel = measure.EllipseModel()
     
     @staticmethod
@@ -255,9 +254,9 @@ class EllipseFitting(threading.Thread):
 
         # put data on target queue(s)
         if self.use_queue:
-            if self.args['gaze_tracking_flag']:
+            if self.args['do_gaze_tracking']:
                 self.threads['ques']['gaze_tracking'].put(gaze_batch)
-            if self.args['torsion_tracking_flag'] and not(self.args['torsion_geometric_correction_type']=='3D'):
+            if self.args['do_torsion_tracking'] and not(self.args['torsion_geometric_correction_type']=='3D'):
                 self.threads['ques']['torsion_tracking'].put(torsion_batch)
 
             # el_dicts_cpu = {k: (v.detach().cpu() if isinstance(v, torch.Tensor) else v) for k, v in el_dicts.items()}
@@ -289,13 +288,11 @@ class EllipseFitting(threading.Thread):
             # put list[dict] into queue
             self.threads['ques']['ellipse_out'].put(el_list)
                 
-            if self.args['seg_video_flag']: 
-                bid = int(frame_batch['idxs'][0])  # or frame_batch.get('batch_id', frame_batch['idxs'][0])
-                if self.args['write_seg_video_type'] == 'raw':
-                    payload = segs.detach().cpu().numpy()
-                elif self.args['write_seg_video_type'] == 'processed':
-                    payload = seg_mask.detach().cpu().numpy()
-                self.threads['ques']['segment_out'].put((bid, payload))
+            if self.args['write_seg_video']: 
+                if self.args['write_seg_video_type']=='raw':
+                    self.threads['ques']['segment_out'].put(segs.detach().cpu().numpy())
+                elif self.args['write_seg_video_type']=='processed':
+                    self.threads['ques']['segment_out'].put(seg_mask.detach().cpu().numpy())
 
                 # sclara_masks = (frame_batch['segs'][:,:,:,-1] > 0.5).bool()
                 # pupil_masks = (frame_batch['segs'][:,:,:,0] > 0.5).bool()
@@ -316,9 +313,9 @@ class EllipseFitting(threading.Thread):
                 if self.args['extract_segment_map']:
                     self.threads['ques']['segment_out'].put(None)
 
-                if self.args['gaze_tracking_flag']:
+                if self.args['do_gaze_tracking']:
                     self.threads['ques']['gaze_tracking'].put(None)
-                if self.args['torsion_tracking_flag'] and not(self.args['torsion_geometric_correction_type']=='3D'):
+                if self.args['do_torsion_tracking'] and not(self.args['torsion_geometric_correction_type']=='3D'):
                     self.threads['ques']['torsion_tracking'].put(None)
                 break
             else:

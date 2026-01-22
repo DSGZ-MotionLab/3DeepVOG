@@ -39,13 +39,21 @@ def get_conf_args(active_args):
         input_vid = active_args['fit_vid']
 
     OS_name = 'macOS' if platform.system() == 'Darwin' else platform.system()
+    # --- Extract video info ---
+    print('\n')
+    print(f"**********  START PROCESSING ({active_args['mode']} mode) **********")
+    # print(f"{active_args['mode']} mode...")
+    print(f"Video source: {input_vid}")
+    print(f"OS: {OS_name}")
+    print(f"Device: {active_args.get('device', device)}")
+    print(f"Running in {'parallel (multi-thread)' if active_args['is_parallel'] else 'sequential (single-thread)'} mode")
 
     # --- Video Input ---
     vid_root, vid_name = os.path.split(input_vid)
     vid_base_name, vid_ext = os.path.splitext(vid_name)
 
     # self.out_dir = active_args['save_folder']
-    log_dir = active_args.get('log_dir', os.path.join(vid_root, 'log'))
+    log_dir = active_args.get('log_dir', vid_root)
     save_folder = os.path.join(log_dir, f"{active_args['mode']}")
     os.makedirs(log_dir, exist_ok=True)
     os.makedirs(save_folder, exist_ok=True)
@@ -63,12 +71,14 @@ def get_conf_args(active_args):
     vid_name_root, ext, vid_reader, \
     (vid_nr_frames, vid_h, vid_w, vid_channels), \
         vid_shape_src, vid_img_scaling_factor, vid_fps = vid_info
+    print(f"Video info: {vid_h}x{vid_w}, {vid_fps} fps, {vid_nr_frames} frames.")
+    print('***************************************************\n')
 
     # --- Param Defaults ---
     conf_args = {
         'OS': OS_name,
-        'vid_h_origin': vid_h,
-        'vid_w_origin': vid_w,
+        'vid_h': vid_h,
+        'vid_w': vid_w,
         'vid_name_root': vid_name_root,
         'vid_reader': vid_reader,
         'resolution': (vid_w, vid_h),
@@ -77,7 +87,7 @@ def get_conf_args(active_args):
         'vid_timestep': 1 / vid_fps,
         'vid_nr_frames': vid_nr_frames,
         'vid_img_scaling_factor': vid_img_scaling_factor,
-        'input_vid': input_vid,
+        'ff_input_vid': input_vid,
         'vid_root': vid_root,
         'vid_name': vid_name,
         'vid_base_name': vid_base_name,
@@ -86,7 +96,7 @@ def get_conf_args(active_args):
         'max_frame': active_args.get('max_frame', vid_nr_frames),  # None means all frames by default
         'log_dir': log_dir,
         'save_folder': save_folder,
-
+        
     }
     # default_eyeball_path = os.path.join(conf_args['vid_root'], 
     #                         f"{conf_args['vid_base_name']}_{active_args['eyeball_model']}_eyeball_model.json")
@@ -112,12 +122,12 @@ def make_args():
 
             # --- Gaze & Eyeball ---
             'extract_segment_map': False,
-            'gaze_tracking_flag': False,
+            'do_gaze_tracking': False,
             'eyeball_model': "PL",
             'model_frozen': True,   #only for PL
 
             # --- Torsion ---
-            'torsion_tracking_flag': False,
+            'do_torsion_tracking': False,
             'torsion_collecte_detail': False,
             'torsion_geometric_correction_type': "polish_2D",
             'torsion_angular_pxl2deg': 0.1,
@@ -135,9 +145,9 @@ def make_args():
             'viz_frame_interval': 1,
             'alpha_seg_overlay': 0.3,
             'viz_time_range': 5.0,
-            'seg_video_flag': False,
+            'write_seg_video': False,
             'seg_overlay_alpha': 0.35,
-            'fit_video_flag': False,
+            'write_fit_video': False,
 
             # --- Processing Options ---
             'connected_components': True,
@@ -194,7 +204,7 @@ def make_args():
         parser.add_argument('--extract_segment_map', type=str, default= False,
                             help="Which segmentation maps to extract: 'all', 'sclera', or 'False'")
 
-        parser.add_argument('--gaze_tracking_flag', action='store_true',
+        parser.add_argument('--do_gaze_tracking', action='store_true',
                             help="Enable gaze tracking")
 
         parser.add_argument('--eyeball_model', type=str, default="PL", choices=["simple", "LeGrand", "PL"],

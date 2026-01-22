@@ -1,17 +1,25 @@
 
 # os.environ['CUDA_LAUNCH_BLOCKING'] = '1'
 import os, torch, time, cv2, threading
+# import sys    # sys.path.append("D:/git/DeepVOG3DTorch/DeepVOG/deepvog3D")
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
+from matplotlib.patches import Ellipse
 import torch.nn.functional as F
+# plt.ion()  # Enable interactive mode
+from monai.transforms import Resize
+import skvideo.io as skv
 import kornia.enhance as kornia_enhance
+# import plotly.offline as pyo
+# from itertools import product
+# import skvideo.io as skv
+from skimage.color import label2rgb
+from skimage import measure
+# from astropy.convolution import convolve as nan_convolve
+
 
 class TorsionTracker(threading.Thread):
-    '''
-    Docstring for TorsionTracker
-    TorsionTracker performs iris torsion tracking on video frames using template matching in polar coordinates.
-    '''
     def __init__(self, threads, args, daemon=False, use_queue=True):
         super().__init__(daemon=daemon)
         self.name = 'Thread-TorsionTracker'
@@ -22,8 +30,8 @@ class TorsionTracker(threading.Thread):
         # general params
         # device is currently hard-coded to cpu, as gpu performs ~4x slower
         self.device = args['device']
-        self.W = args['vid_w']
-        self.H = args['vid_h']
+        self.vid_w = args['vid_w']
+        self.vid_h = args['vid_h']
         # torsion-specific params
         self.update_interval = int(args['torsion_force_update_template_interval_sec']*args['vid_fps'])
         self.angular_pxl2deg = args['torsion_angular_pxl2deg']
@@ -43,8 +51,8 @@ class TorsionTracker(threading.Thread):
         self.polar_elapsed_time = 0
         self.TM_elapsed_time = 0
 
-        self.mm2px = np.linalg.norm(np.array(self.args['resolution'])) / np.linalg.norm(np.array(self.args['sensor_size']))
-        self.r_eye_canonical = 12.0*self.mm2px
+        self.mm2px_scaling = np.linalg.norm(np.array(self.args['resolution'])) / np.linalg.norm(np.array(self.args['sensor_size']))
+        self.canonical_eyeball_radius = 12.0*self.mm2px_scaling
 
         # some initial values
         self.template_available = False
@@ -61,9 +69,10 @@ class TorsionTracker(threading.Thread):
 
         if self.args['torsion_geometric_correction_type']=='3D':
             eyeball_info = pd.read_json(self.args['eyeball_path'],orient='index').T
-            self.c_eye = eyeball_info.loc[0, ['eye_centre_x', 'eye_centre_y', 'eye_centre_z']].values.reshape(3,1)
-            self.r_eye = eyeball_info.loc[0, 'aver_eye_radius']
-            
+            self.eye_centre = eyeball_info.loc[0, ['eye_centre_x', 'eye_centre_y', 'eye_centre_z']].values.reshape(3,1)
+            self.eye_radius = eyeball_info.loc[0, 'aver_eye_radius']
+
+        # self.compiled_ncc = torch.compile(self.ncc_batch)
     
     def normalizeRobust_batch(self, img_batch, percentiles=[5, 95], bg_threshold=0.05):
         # Calculate the percentiles & mask for valid pixels
@@ -200,7 +209,19 @@ class TorsionTracker(threading.Thread):
         denom = torch.norm(uI, dim=(-2, -1)).unsqueeze(-1) * torch.norm(uJ, dim=(-2, -1))  # [bs,1] * [sr]
         r = torch.nan_to_num(nom / denom)
         return r
-
+    
+    @staticmethod
+    def fast_ncc_batch(I_batch, J_all, eps=1e-8):   #this code is slower
+    # Subtract mean (along H,W)
+        I_norm = I_batch - I_batch.mean(dim=(-2, -1), keepdim=True)  # [B, S, H, W]
+        J_norm = J_all - J_all.mean(dim=(-2, -1), keepdim=True)      # [S, R, H, W]
+                # Normalize: now each patch has unit norm
+        I_norm = F.normalize(I_norm.flatten(start_dim=-2), dim=-1)  # [B, S, H*W]
+        J_norm = F.normalize(J_norm.flatten(start_dim=-2), dim=-1)  # [S, R, H*W]
+        r = torch.einsum('bsi,sri->bsr', I_norm, J_norm)  # [B, S, R]
+        # denom = torch.norm(uI, dim=(-2, -1)).unsqueeze(-1) * torch.norm(uJ, dim=(-2, -1))  # [bs,1] * [sr]
+        # r = torch.nan_to_num(nom / denom)                            # [B, S, R]
+        return r
 
     @staticmethod
     def gen_polar_tensor_coord(el, B, H, W, device):
@@ -232,14 +253,8 @@ class TorsionTracker(threading.Thread):
         # Intermidiate tensor coordinates (normalzied iris ring)
         Z = torch.polar(r_mesh.flatten(), t_mesh.flatten())  # [B*H*W]
         X_norm, Y_norm = Z.real.view(1, -1), Z.imag.view(1, -1)
-        if self.args['torsion_geometric_correction_type']=='3D' and self.args['gaze_tracking_flag']:
-
-            # iris_el, ok = circle2ellipse(gaze_batch['c_pupil'],
-            #                     gaze_batch['gaze'], 
-            #                     gaze_batch['r_iris'], 
-            #                     fpx, img_size, return_angle_vec=False)
-                        
-            R_eye = self.r_eye_canonical   #R_eye doesn't affect the result, but only the scale
+        if self.args['torsion_geometric_correction_type']=='3D' and self.args['do_gaze_tracking']:
+            R_eye = self.canonical_eyeball_radius   #R_eye doesn't affect the result, but only the scale
             Z_norm = torch.sqrt(R_eye**2 - X_norm**2 - Y_norm**2)
             P = torch.cat((X_norm, Y_norm, Z_norm), dim=0).float()
             np_per_batch = P.shape[1] //  B
@@ -268,8 +283,8 @@ class TorsionTracker(threading.Thread):
                 P_corr_batch = P_corr.view(B, H, 3, W).permute(0, 2, 1, 3).reshape(B, 3, -1)
                         
         P_corr_batch_normalized = P_corr_batch[:,:2,:].clone()
-        P_corr_batch_normalized[:, 0, :] = 2*(P_corr_batch[:, 0, :]/(self.W - 1))- 1 
-        P_corr_batch_normalized[:, 1, :] = 2*(P_corr_batch[:, 1, :]/(self.H - 1))- 1 
+        P_corr_batch_normalized[:, 0, :] = 2*(P_corr_batch[:, 0, :]/(self.vid_w - 1))- 1 
+        P_corr_batch_normalized[:, 1, :] = 2*(P_corr_batch[:, 1, :]/(self.vid_h - 1))- 1 
         # # Perform grid sampling
         # expects grid to be [N, H_out, W_out, 2], where last dim corresponds to (x, y) coordinate
         grid = P_corr_batch_normalized[:, :2, :].permute(0, 2, 1).view(B, H, W, 2)
@@ -559,7 +574,7 @@ class TorsionTracker(threading.Thread):
                 frame_batch_torsion_viz if self.args['torsion_collecte_detail'] else torsion_angles_batch
             )
         
-        # if self.args['fit_video_flag'] and self.args['torsion_tracking_flag']:
+        # if self.args['write_fit_video'] and self.args['do_torsion_tracking']:
             # self.threads['ques']['fitvideo_writer'].put(gaze_batch)
             # pass
         else:
@@ -567,7 +582,6 @@ class TorsionTracker(threading.Thread):
             # return frame_batch_torsion_viz if self.params['viz_torsion'] or self.params['torsion_collecte_detail'] else torsion_angles_batch
 
     def run(self):
-        torch.set_grad_enabled(False)
         while True:
             # read data from source queue
             frame_batch = self.threads['ques']['torsion_tracking'].get()
@@ -583,6 +597,5 @@ class TorsionTracker(threading.Thread):
                 # print('%s: received poison pill! Closing!'%(self.name))
                 break
             else:
-                with torch.no_grad():
-                    self.torsion_tracker(frame_batch)
+                self.torsion_tracker(frame_batch)
                 

@@ -206,27 +206,10 @@ def rend_params(out_dict: dict) -> dict:
     fpx = out_dict['fcl_px']
     out_dict["L_p"]  = (L_p  := torch.sqrt((r_eye**2 - r_iris**2).clamp_min_(1e-6)))
     out_dict["L_ec"] = (L_ec := L_p - torch.sqrt((r_cornea**2 - r_iris**2).clamp_min_(1e-6)))
+    c_eye    = out_dict["c_eye"]
+    c_pupil  = out_dict["c_pupil"]
+    out_dict["c_cornea"] = (c_cornea := c_eye + L_ec * gaze)
 
-    c_cornea = out_dict.get("c_cornea", None)
-    c_eye    = out_dict.get("c_eye", None)
-    c_pupil   = out_dict.get("c_pupil", None)
-
-    gaze = gaze / gaze.norm(dim=-1, keepdim=True).clamp_min(1e-8)
-    out_dict["gaze"] = gaze
-
-    if c_eye is None:
-        if c_cornea is None:
-            out_dict["c_eye"] = (c_eye := c_pupil - L_p * gaze)
-            out_dict["c_cornea"] = (c_cornea := c_eye + L_ec * gaze)
-            if c_pupil is None:
-                raise ValueError("Provide at least one of c_cornea, c_eye, c_pupil.")
-        else:
-            out_dict["c_eye"] = (c_eye := c_cornea - L_ec * gaze)
-    else:
-        out_dict["c_cornea"] = (c_cornea := c_eye + L_ec * gaze)
-
-    if c_pupil is None:
-        out_dict["c_pupil"] = (c_pupil := c_eye + L_p * gaze)
     # if np.isnan(c_eye).any() or np.isnan(c_pupil).any(): return None
     # gaze_vec_rev = torch.clone(gaze_vec)*torch.tensor([1.0, 1.0, -1.0], device=gaze_vec.device)  # flip z to match camera coordinates
     c_eye2d = out_dict.get("c_eye2d", projection(c_eye, fpx, img_size))
@@ -251,7 +234,7 @@ def rend_params(out_dict: dict) -> dict:
 
     # build R aligned+torsion
     # ref_axis = torch.tensor([0,0,-1], dtype=torch.float32, device=device)
-    R_comb  = build_rotation_matrices(gaze, torsion)
+    R_comb  = build_rotation_matrices(gaze, torsion).to(device=device, dtype=torch.float32)
     # R_comb = torch.eye(3, dtype=torch.float32, device=device).unsqueeze(0).repeat(B, 1, 1)
 
     # rotate & shift
