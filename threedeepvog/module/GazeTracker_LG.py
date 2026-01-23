@@ -1,11 +1,6 @@
-
-#%% script_05_dv3d_threaded_classes.py
-# import os
-# os.environ['CUDA_LAUNCH_BLOCKING'] = '1'
 import os
-# import sys    # sys.path.append("D:/git/DeepVOG3DTorch/DeepVOG/deepvog3D")
 import torch
-import logging
+import threading
 import time
 import cv2
 import numpy as np
@@ -30,21 +25,11 @@ from pye3d.detector_3d import CameraModel, Detector3D, DetectorMode
 #     input_features
 # )[0]
 
-import subprocess    #Run a command at python script  (e.g. ls, dir, etc.)
-import threading
-import queue
-
-
-# import plotly.offline as pyo
-# from itertools import product
-from ..tool.unprojection import convert_ell_to_general_batch, unprojectGazePositions_batch, reproject, reverse_reproject
-from ..tool.intersection import intersect ,intersect_batch, fit_ransac_batch, fit_ransac_batch_v2, fit_ransac_batch_v3, fit_ransac_batch_v4, fit_ransac_batch_v5, fit_ransac_batch_v6, line_sphere_intersect_batch
-from ..tool.cart2sph import cart2sph_batch
+from ..utils.unprojection import convert_ell_to_general_batch, unprojectGazePositions_batch, reproject, reverse_reproject
+from ..utils.intersection import intersect ,intersect_batch, fit_ransac_batch, fit_ransac_batch_v2, fit_ransac_batch_v3, fit_ransac_batch_v4, fit_ransac_batch_v5, fit_ransac_batch_v6, line_sphere_intersect_batch
+from ..utils.cart2sph import cart2sph_batch_PL, cart2sph_batch
 from ..utils.read_and_save import save_json
 from ..utils.transformation import PL2normDict_batch, circle2ellipse
-from ..utils.visualization import gen_sphere_mesh, fit_legrand_model
-# from utils.visualization import fit_legrand_model, project_3d_to_2d
-
 '''
 Currently, only implemented signle sphere eyeball model
 The algorithm has optimized for vectorized computation in GPU
@@ -501,7 +486,7 @@ class GazeTracker(threading.Thread):
                 self.current_pupil_pos_centres,self.current_pupil_neg_centres,\
                 _ = self.unproject_batch_observation(el_use, mask)
                 p_batch, n_batch, pupil_radius_batch, consistence_batch = self.calc_3Dpupil_info_batch()
-                theta_batch, phi_batch = cart2sph_batch(n_batch.T)  
+                theta_batch, phi_batch = cart2sph_batch(n_batch)  
                 p_batch = p_batch.cpu().numpy()
                 n_batch = n_batch.cpu().numpy()
                 gaze_batch = {
@@ -575,7 +560,7 @@ class GazeTracker(threading.Thread):
                 results_3d.append(result_3d)
                 self.frame_counter += 1
             gaze_batch = PL2normDict_batch(results_3d)
-
+            gaze_batch['hor'], gaze_batch['ver'] = cart2sph_batch_PL(gaze_batch['gaze'])
             self.threads['ques']['gaze_out'].put(gaze_batch)
         time01 = time.time()
         self.elapsed_time += (time01 - time00) 

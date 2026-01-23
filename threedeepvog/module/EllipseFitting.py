@@ -296,13 +296,6 @@ class EllipseFitting(threading.Thread):
                 elif self.args['write_seg_video_type'] == 'processed':
                     payload = seg_mask.detach().cpu().numpy()
                 self.threads['ques']['segment_out'].put((bid, payload))
-
-                # sclara_masks = (frame_batch['segs'][:,:,:,-1] > 0.5).bool()
-                # pupil_masks = (frame_batch['segs'][:,:,:,0] > 0.5).bool()
-                # iris_masks = (frame_batch['segs'][:,:,:,1] > 0.5).bool()
-                # mask = torch.stack([pupil_masks, iris_masks, sclara_masks], dim=-1)
-                # self.threads['ques']['segment_out'].put(mask)
-                # self.threads['ques']['segment_out'].put(frame_batch)
         else:
             return el_dicts, gaze_batch, torsion_batch
         
@@ -313,7 +306,7 @@ class EllipseFitting(threading.Thread):
             frame_batch = self.threads['ques']['ellipse_fitting'].get()
             if frame_batch is None: # poison pill
                 self.threads['ques']['ellipse_out'].put(None)
-                if self.args['extract_segment_map']:
+                if self.args['seg_video_flag']:
                     self.threads['ques']['segment_out'].put(None)
 
                 if self.args['gaze_tracking_flag']:

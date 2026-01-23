@@ -3,7 +3,6 @@ import os
 
 import torch
 
-from ..tool.cart2sph import cart2sph_batch_PL
 os.environ['VISPY_APP'] = 'pyside6'
 import cv2
 import numpy as np
@@ -14,7 +13,7 @@ import pickle
 from matplotlib import pyplot as plt
 # from fast_deepvog3D.model3D.segmentation_model import SegResNet_3in3out_model
 from scipy.spatial.transform import Rotation as Quaternion_Rotation
-# from deepvog_processer import deepvog_processer_v2
+from ..utils.cart2sph import cart2sph_batch_PL
 from ..utils.read_and_save import get_video_info_cv2
 from ..utils.gaze_process import opt_transform_v3
 from ..utils.torsion_process import clean_signal, interpolate_nan

@@ -118,8 +118,8 @@ def PL2normDict_batch(results_3d: list[dict]) -> dict:
         gaze[i] = c3.get("normal", (0.0, 0.0, 0.0))
         r_pupil[i] = float(c3.get("radius", 0.0))
 
-        hor[i] = float(r.get("phi", 0.0))
-        ver[i] = float(r.get("theta", 0.0))
+        # hor[i] = float(r.get("phi", 0.0))
+        # ver[i] = float(r.get("theta", 0.0))
 
         diameter_3d[i] = float(r.get("diameter_3d", 0.0))
         location[i] = r.get("location", (0.0, 0.0))
@@ -142,8 +142,8 @@ def PL2normDict_batch(results_3d: list[dict]) -> dict:
         "r_eye2d": r_eye2d,
         "c_pupil": c_pupil,
         "gaze": gaze,
-        "hor": hor,
-        "ver": ver,
+        # "hor": hor,
+        # "ver": ver,
         "r_pupil": r_pupil,
         "entpup_el": entpup_el,
         "diameter_3d": diameter_3d,
@@ -238,7 +238,7 @@ def rend_params(out_dict: dict) -> dict:
     # R_comb = torch.eye(3, dtype=torch.float32, device=device).unsqueeze(0).repeat(B, 1, 1)
 
     # rotate & shift
-    large_meshes = rotate_and_shift(large_meshes, c_eye,   R_comb)
+    large_meshes = rotate_and_shift(large_meshes, c_eye,   R_comb)   #B x Θ x Φ x 3
     small_meshes = rotate_and_shift(small_meshes, c_cornea,R_comb)
 
     # Expand to match temporal dimension T
@@ -246,15 +246,23 @@ def rend_params(out_dict: dict) -> dict:
     r_cornea2 = (r_cornea.view(-1)**2)[:, None, None]
     r_eye2    = (r_eye.view(-1)**2)[:, None, None]
 
-    d_large = ((large_meshes - c_cornea[:,None,None,:])**2).sum(-1)
-    d_small = ((small_meshes - c_eye[:,None,None,:])**2).sum(-1)
-    large_mask = d_large < (r_cornea2 - eps)          # inside cornea => nan
-    small_mask = d_small > (r_eye2 - eps)             # outside eyeball => keep (like your current logic)
-    large_meshes = torch.where(large_mask[...,None], torch.nan, large_meshes)
-    small_meshes = torch.where(small_mask[...,None], small_meshes, torch.nan)
+    # squared distances
+    d_large = ((large_meshes - c_cornea[:, None, None, :]) ** 2).sum(-1)
+    d_small = ((small_meshes - c_eye   [:, None, None, :]) ** 2).sum(-1)
+    r_cornea2 = (r_cornea.view(-1) ** 2)[:, None, None]
+    r_eye2    = (r_eye.view(-1) ** 2)[:, None, None]
 
-    large_coords_2d = projection(large_meshes, fpx, img_size)
-    small_coords_2d = projection(small_meshes, fpx, img_size)
+    # band thickness (tune): e.g. 0.2% of radius^2
+    band_large = (r_cornea2 * 2e-3).clamp_min(1e-4)  # stable for float32
+    band_small = (r_eye2    * 2e-3).clamp_min(1e-4)
+    # eyeball: remove points clearly inside cornea sphere
+    large_mask = d_large < (r_cornea2 - band_large)
+    small_keep = d_small >= (r_eye2 - band_small)
+    large_meshes = torch.where(large_mask[..., None], torch.nan, large_meshes)
+    small_meshes = torch.where(small_keep[..., None], small_meshes, torch.nan)
+
+    large_coords_2d = projection(large_meshes, fpx, img_size, eps = 0)
+    small_coords_2d = projection(small_meshes, fpx, img_size, eps = 0)
     vis_dicts = {
         "eyeball_mesh": large_meshes, 
         "corneaball_mesh": small_meshes,

@@ -54,6 +54,7 @@ class ParamsRender(threading.Thread):
         ]
         xy_mesh = {k: results.get(k) for k, _ in mesh_specs}  # hoist once
 
+        # ---- helpers ----
         def draw_point(img, xy, color, r):
             xy = np.asarray(xy, dtype=np.float32).reshape(-1)
             if xy.size < 2 or not np.isfinite(xy[:2]).all():
@@ -70,12 +71,26 @@ class ParamsRender(threading.Thread):
                 return
             x0, y0 = float(p0[0]), float(p0[1])
             x1, y1 = float(p1[0]), float(p1[1])
-            # draw only if at least one endpoint is near image
             if not ((-10 <= x0 <= W + 10 and -10 <= y0 <= H + 10) or (-10 <= x1 <= W + 10 and -10 <= y1 <= H + 10)):
                 return
-            cv2.line(img, (int(x0 + 0.5), int(y0 + 0.5)), (int(x1 + 0.5), int(y1 + 0.5)),
-                    color, thickness, lineType=cv2.LINE_AA)
+            cv2.line(
+                img,
+                (int(x0 + 0.5), int(y0 + 0.5)),
+                (int(x1 + 0.5), int(y1 + 0.5)),
+                color,
+                thickness,
+                lineType=cv2.LINE_AA,
+            )
 
+        # text style
+        font = cv2.FONT_HERSHEY_SIMPLEX
+        font_scale = 0.3 if max(H, W) <= 400 else 0.4
+        thick_txt = max(1, t)
+        pad = 1
+
+        # prefetch arrays (optional)
+        hor_arr = results.get("hor", None)
+        ver_arr = results.get("ver", None)
 
         for ix in range(B):
             img = cv2.cvtColor(images[ix], cv2.COLOR_GRAY2BGR)
@@ -85,15 +100,25 @@ class ParamsRender(threading.Thread):
                 xy = xy_mesh.get(mesh_key)
                 if xy is None:
                     continue
+
                 x = xy[ix, :, :, 0]
                 y = xy[ix, :, :, 1]
-                for i in range(nn):
-                    for pts in [np.column_stack((x[i], y[i])), np.column_stack((x[:, i], y[:, i]))]:
-                        pts = pts[~np.isnan(pts).any(axis=1) &
-                                np.isfinite(pts).all(axis=1) &
-                                np.all(np.abs(pts) <= max(H, W)*100, axis=1)]
-                        if len(pts) > 1:
-                            cv2.polylines(img, [pts.astype(np.int32)], False, color, t)
+
+                # IMPORTANT: your mesh is Hm x Wm; iterate both dims safely
+                Hm, Wm = x.shape
+                n_use = min(nn, Hm, Wm)
+
+                for i in range(n_use):
+                    for pts in (np.column_stack((x[i], y[i])), np.column_stack((x[:, i], y[:, i]))):
+                        pts = pts[
+                            np.isfinite(pts).all(axis=1)
+                            & np.all(np.abs(pts) <= max(H, W) * 100, axis=1)
+                        ]
+                        if pts.shape[0] > 1:
+                            # optional: clip before cast to avoid int overflow
+                            pts[:, 0] = np.clip(pts[:, 0], -W * 10, W * 10)
+                            pts[:, 1] = np.clip(pts[:, 1], -H * 10, H * 10)
+                            cv2.polylines(img, [np.rint(pts).astype(np.int32)], False, color, t, lineType=cv2.LINE_AA)
 
             # ---- keypoints ----
             draw_point(img, results["c_eye2d"][ix],   self.color_map["c_eye"],   t + 2)
@@ -114,8 +139,39 @@ class ParamsRender(threading.Thread):
                     p1 = (float(p0[0]) + 50.0 * float(gv[0]), float(p0[1]) + 50.0 * float(gv[1]))
                     draw_line(img, p0, p1, self.color_map["gaze"], t * 2)
 
-            out[ix] = img
+            # ---- top-right text: hor / ver ----
+            if hor_arr is not None and ver_arr is not None:
+                hor = float(hor_arr[ix]) if np.isfinite(hor_arr[ix]) else np.nan
+                ver = float(ver_arr[ix]) if np.isfinite(ver_arr[ix]) else np.nan
 
+                # choose format (here: degrees)
+                text = f"hor={hor:.2f}  ver={ver:.2f}" if np.isfinite(hor) and np.isfinite(ver) else "hor=nan  ver=nan"
+
+                (tw, th), base = cv2.getTextSize(text, font, font_scale, thick_txt)
+                x0 = max(0, W - tw - 2 * pad)
+                y0 = max(0, 0 + pad + th)  # top-right
+
+                # background box
+                cv2.rectangle(
+                    img,
+                    (x0, y0 - th - pad),
+                    (min(W - 1, x0 + tw + 2 * pad), min(H - 1, y0 + base + pad)),
+                    (0, 0, 0),
+                    thickness=-1,
+                )
+                # text
+                cv2.putText(
+                    img,
+                    text,
+                    (x0 + pad, y0),
+                    font,
+                    font_scale,
+                    (255, 255, 255),
+                    thick_txt,
+                    lineType=cv2.LINE_AA,
+                )
+
+            out[ix] = img
         return out
 
     def rendering(self, render_batch):

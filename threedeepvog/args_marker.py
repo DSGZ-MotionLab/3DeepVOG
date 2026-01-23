@@ -111,7 +111,7 @@ def make_args():
             'segmentation_model_weights_path': None,
 
             # --- Gaze & Eyeball ---
-            'extract_segment_map': False,
+            'write_seg_video_type': 'processed',  # 'raw', 'processed', False
             'gaze_tracking_flag': False,
             'eyeball_model': "PL",
             'model_frozen': True,   #only for PL
@@ -191,8 +191,8 @@ def make_args():
                             help="Path to pre-trained segmentation model weights")
 
         # --- Gaze & Eyeball ---
-        parser.add_argument('--extract_segment_map', type=str, default= False,
-                            help="Which segmentation maps to extract: 'all', 'sclera', or 'False'")
+        parser.add_argument('--write_seg_video_type', type=str, default= False,
+                            help="Which segmentation maps to extract: 'raw', 'processed', or False")
 
         parser.add_argument('--gaze_tracking_flag', action='store_true',
                             help="Enable gaze tracking")
