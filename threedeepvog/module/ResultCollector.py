@@ -9,8 +9,18 @@ import skvideo.io as skv
 import torch
 
 _STOP = object()
-
 class DiskWriter(threading.Thread):
+    """
+    Background writer thread:
+    - Receives batched outputs via a queue.
+    - Buffers them in RAM for a while (flush_every).
+    - Periodically writes atomic pickle files to disk.
+
+    Why buffering?
+    - Writing every batch is slow (I/O bound) and can bottleneck the pipeline.
+    - Buffering + periodic flush reduces overhead and keeps processing realtime.
+    """
+
     def __init__(self, out_dir: Path, flush_every=200, daemon=True):
         super().__init__(daemon=daemon)
         self.out_dir = Path(out_dir); self.out_dir.mkdir(parents=True, exist_ok=True)
@@ -27,6 +37,12 @@ class DiskWriter(threading.Thread):
 
     @staticmethod
     def _atomic_pickle(obj, path: Path):
+        """
+        Write pickle atomically:
+        - write to *.tmp first
+        - replace target file
+        This prevents partially-written/corrupted outputs if process crashes mid-write.
+        """
         tmp = path.with_suffix(path.suffix + ".tmp")
         pd.to_pickle(obj, tmp)
         tmp.replace(path)
@@ -35,13 +51,19 @@ class DiskWriter(threading.Thread):
         self.q.put((kind, payload))
 
     def push_gaze(self, payload: dict):
-        # payload: dict of numpy arrays, each shaped (B,...) where axis 0 is batch
+        """
+        Buffer gaze outputs.
+
+        payload is a dict of arrays, each shaped (B, ...) where axis 0 is batch.
+        We store per-key chunks so we can concatenate later.
+        """
         for k, v in payload.items():
             if isinstance(v, torch.Tensor):
                 v = v.detach().cpu().numpy()
             self.gaze_buf[k].append(v)
 
     def _flush(self):
+        """Flush all buffered outputs to disk."""
         if self.ellipse_buf:
             df = pd.concat(self.ellipse_buf, ignore_index=True)
             self._atomic_pickle(df, self.ellipse_pkl)
@@ -82,6 +104,12 @@ class DiskWriter(threading.Thread):
             self.torsion_buf.clear()
 
     def run(self):
+        """
+        Thread loop:
+        - Read items from queue until _STOP
+        - Buffer them
+        - Periodically flush
+        """
         while True:
             item = self.q.get()
             if item is _STOP:
@@ -108,6 +136,10 @@ class DiskWriter(threading.Thread):
 
 
 class OverlayWriter(threading.Thread):
+    """
+    Writes a segmentation overlay video asynchronously.
+    It pairs raw frames with segmentation masks using a shared batch_id.
+    """
     def __init__(self, out_path: Path, fps: float, size_wh, alpha=0.35, daemon=True):
         super().__init__(daemon=daemon)
         self.out_path = Path(out_path)
@@ -140,6 +172,10 @@ class OverlayWriter(threading.Thread):
         self.q.put(("seg", batch_id, seg))
 
     def _ensure_bhwc3(self, seg):
+        """
+        Normalize segmentation format to (B,H,W,3).
+        Handles tensors, grayscale masks, and (B,W,H,C) layout.
+        """
         seg = seg.detach().cpu().numpy() if isinstance(seg, torch.Tensor) else np.asarray(seg)
         if seg.ndim == 3: seg = seg[..., None]
         if seg.shape[-1] == 1: seg = np.repeat(seg, 3, axis=-1)
@@ -149,6 +185,10 @@ class OverlayWriter(threading.Thread):
         return seg
 
     def _seg_to_overlay_bgr(self, seg_bhwc):
+        """
+        Convert seg array to a visible overlay in BGR.
+        If grayscale mask -> magenta overlay.
+        """
         # simple magenta if grayscale mask
         is_gray = np.all(seg_bhwc[...,0] == seg_bhwc[...,1]) and np.all(seg_bhwc[...,1] == seg_bhwc[...,2])
         if is_gray:
@@ -186,6 +226,11 @@ class OverlayWriter(threading.Thread):
             self.writer.writeFrame(cv2.cvtColor(out, cv2.COLOR_BGR2RGB))
 
     def run(self):
+        """
+        Pairing logic:
+        - Store frames/segs by batch id
+        - When both exist for a batch id, write them and delete from dicts
+        """
         while True:
             item = self.q.get()
             if item is _STOP:
@@ -205,6 +250,10 @@ class OverlayWriter(threading.Thread):
 
 
 class FitVideoWriter(threading.Thread):
+    """
+    Writes fitted/overlay frames to video asynchronously.
+    Input can be batched or single frame, grayscale or BGR.
+    """
     def __init__(self, out_path: Path, fps: float, size_wh, daemon=True):
         super().__init__(daemon=daemon)
         self.out_path = Path(out_path)
@@ -269,7 +318,15 @@ class FitVideoWriter(threading.Thread):
 
 
 class ResultRouter(threading.Thread):
-    """Only drains main queues and dispatches to workers. Minimal work."""
+    """
+    Lightweight collector/router thread:
+    - Drains shared output queues (frame_out, segment_out, ellipse_out, gaze_out, torsion_out, fitted_frame_out)
+    - Forwards to:
+        * DiskWriter (pickle files)
+        * OverlayWriter (seg overlay mp4)
+        * FitVideoWriter (fit overlay mp4)
+    This keeps heavy work away from compute threads.
+    """
     def __init__(self, threads, args, disk, overlay=None, fit_writer=None, daemon=True):
         super().__init__(daemon=daemon)
         self.threads = threads

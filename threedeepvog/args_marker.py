@@ -1,15 +1,9 @@
 """
-3DeepVOG CLI Tool - Eye Tracking Pipeline Configuration
+3DeepVOG CLI Tool - Eye Tracking Pipeline Configuration (under development)
 
 This script is part of the 3DeepVOG project. It parses command-line arguments and sets up
 configuration parameters for processing eye-tracking videos, including gaze estimation,
 torsion tracking, and segmentation.
-
-Features:
-- Automatic device selection (MPS, CUDA, CPU)
-- Video metadata extraction
-- Configurable segmentation and torsion parameters
-- CLI interface with argparse
 
 Author: Jingkang Zhao
 Date: 19-01-2026
@@ -22,7 +16,7 @@ import os, platform, torch, sys
 from .utils.read_and_save import get_video_info_torch
 
 
-def get_conf_args(active_args):
+def get_conf_args(active_args: dict) -> dict:
     """
     Given user arguments, extract video metadata and construct a dictionary of config parameters.
 
@@ -322,7 +316,7 @@ def make_args():
 def main():
     args = make_args()
     # pred_vid = args['pred_vid']
-    pred_vid = pred_vid = '/Users/josephzhao/Desktop/Doctoral Project/DeepVOG project/video_test/visualization4TAC2025/ES_gaze_jzhao_v3.mp4'
+    pred_vid = pred_vid = '/Users/jzhao/Desktop/Doctoral_project/DeepVOG/video_test/ES_gaze.mp4'
     args['fit_vid'] = args.get('fit_vid', pred_vid)
     if args['mode'] == 'auto':
         args['mode'] = 'fit'  # or infer intelligently later
@@ -331,7 +325,5 @@ def main():
     active_args = {**args, **conf_args}
     pprint(active_args)
 
-
-    # return default_args, threshold_args, camera_args, torsion_args
 if __name__ == "__main__":
     main()

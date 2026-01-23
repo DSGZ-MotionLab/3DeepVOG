@@ -1,35 +1,70 @@
-# Compare to v2, the code separate calibration and prediction using PL algorithm
-# -> need to give calibration vid for eyeball fitting and give main vif for prediction
+"""
+threedeepvog.main
 
-# - model can give third party eye feature segmentation model in ModelInference (default: Berk model)
+Main entry point for the 3DeepVOG pipeline.
 
+This module orchestrates the full eye-tracking workflow, including:
+- video loading and optional automatic downscaling
+- segmentation-based eye feature inference
+- ellipse fitting
+- eyeball model fitting (calibration)
+- gaze and torsion estimation
+- optional visualization and video output
 
-#Currently, only pupil lab algorithm can achieve online processing whereas legacy code couldn't achieve this.
-#TODO
-# - Enable to conduct eyeball fitting and gaze/ torsional prediction separetely
-# - Enable to conduct eyeball fitting and gaze/ torsional prediction together -> which is the current mode
+Modes
+-----
+- fit:
+    Perform eyeball model fitting (calibration) using a calibration video.
+    Outputs an eyeball parameter file (JSON).
 
-# all while requiring minimal code changes
-# import matplotlib
-# matplotlib.use("TkAgg")
-# matplotlib.use("Agg")  
-from ast import arg
+- predict:
+    Perform gaze (and optional torsion) prediction using an existing eyeball model.
+
+- auto / all:
+    Run eyeball fitting first (if no existing model is found), then run prediction.
+
+Key Features
+------------
+- Unified pipeline for fitting and prediction with minimal code duplication.
+- Supports both sequential (single-thread) and parallel (multi-thread) execution.
+- Automatic video downscaling to a processing resolution (default ~320x240)
+  to improve performance while preserving aspect ratio.
+- Modular, queue-based architecture for scalability and extensibility.
+- Optional outputs:
+    - segmentation overlay video
+    - fitted model visualization video
+    - per-frame gaze and torsion results saved to disk
+
+Notes
+-----
+- The segmentation model is provided via ModelInference and can be replaced
+  by third-party models (e.g., SegResNet, SegFormer).
+- Pupil Labs–style 3D gaze estimation (PL algorithm) supports online processing.
+- Gaze tracking is enabled in both fit and predict modes; torsion tracking
+  is only active in predict mode.
+- All geometric parameters (mm2px, focal length, resolution) are automatically
+  adjusted after resizing to ensure physical consistency.
+
+TODO
+----
+- Fully decouple eyeball fitting and gaze prediction into independent runs.
+- Improve configuration handling for mixed offline/online workflows.
+- Optional real-time streaming input support.
+
+"""
+
 import os, torch, time, cv2, queue, threading
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 from tqdm import tqdm
 from pathlib import Path
-import skvideo.io as skv
-from fractions import Fraction
-from collections import deque
 
-from .module import SummaryVideoCreator
 from .args_marker import make_args, get_conf_args
 from .module.ModelInference import ModelInference
 from .module.PostProcessing import PostProcessing
 from .module.EllipseFitting import EllipseFitting
-from .module.GazeTracker_LG import GazeTracker
+from .module.GazeTracker import GazeTracker
 from .module.TorsionTracker import TorsionTracker
 from .module.ParamsRender import ParamsRender
 from .module.ResultCollector import DiskWriter, OverlayWriter, FitVideoWriter, ResultRouter
@@ -191,11 +226,6 @@ def main(args):
 
                 threads['ques']['torsion_out'].put(torsion_batch)
             
-            # if args['viz_results']:
-            #     viz = tasks['visualization'].viz_gaze(frame_batch)
-            #     writer = tasks['video_writer']
-            #     (writer.write_frame_batch if args['viz_frame_interval'] == 1 else writer.write_single_frame)(viz)
-
 
     # --- Main Loop ---
     img_batch = torch.zeros((args['batch_size'], args['vid_h'], args['vid_w']), dtype=torch.float32)

@@ -1,311 +1,389 @@
+"""
+EllipseFitting thread
 
-#%% script_05_dv3d_threaded_classes.py
-# import os
-# os.environ['CUDA_LAUNCH_BLOCKING'] = '1'
+This thread takes segmentation probability maps (pupil / iris / sclera) and fits ellipses
+for pupil and iris per frame (batched). It also produces masks used downstream for:
+
+- Eyeball model fitting / gaze tracking (GazeTracker)
+- Iris torsion tracking (TorsionTracker)
+- Optional overlay/segmentation video writing
+- Saving ellipse parameters to disk (ellipse_out)
+
+Design notes
+------------
+- The geometric ellipse fit itself uses OpenCV (cv2.fitEllipse), so it runs on CPU.
+  Everything else (thresholding, perimeter extraction, confidence computation) is done
+  with PyTorch and can run on GPU, but the CPU hop for fitEllipse is the bottleneck.
+
+- Input assumptions:
+  frame_batch contains:
+    imgs: (B,H,W) float32 in [0,1]
+    segs: (B,H,W,C) float32 in [0,1] (at least channels: pupil, iris, ..., sclera as last channel)
+    is_valid: (B,) bool
+    idxs: (B,) frame indices
+
+Outputs
+-------
+1) gaze_batch -> to queue 'gaze_tracking' (if gaze_tracking_flag)
+   Contains gray frames + ellipse params + pupil/iris masks + blink flags.
+
+2) torsion_batch -> to queue 'torsion_tracking' (if torsion_tracking_flag and correction != '3D')
+   Contains "useful_maps" (iris ring texture), ellipses, blink flags, etc.
+
+3) ellipse_out -> to queue 'ellipse_out'
+   A list[dict] with per-frame scalar/array ellipse outputs, for disk writer.
+
+4) segment_out -> to queue 'segment_out' (optional)
+   Raw seg volume or processed seg_mask for overlay video.
+
+Key computations
+----------------
+- bwperim_batch: computes a thin perimeter mask around thresholded blobs (GPU-friendly).
+- cv2.fitEllipse: ellipse parameter estimation from perimeter pixels (CPU).
+- EllipseConfidence_batch: score how well the segmentation mass lies inside fitted ellipse.
+- blink_score: overlap of pupil mask with sclera mask used to detect blinks.
+"""
+
 import os
-# import sys    # sys.path.append("D:/git/DeepVOG3DTorch/DeepVOG/deepvog3D")
 import torch
 import time
 import cv2
 import numpy as np
-import pandas as pd
-import matplotlib.pyplot as plt
-from matplotlib.patches import Ellipse
-from monai.transforms import Resize
-import skvideo.io as skv
-import kornia.enhance as kornia_enhance
 import threading
-# import plotly.offline as pyo
 from concurrent.futures import ThreadPoolExecutor
-# import skvideo.io as skv
-# from astropy.convolution import convolve as nan_convolve
-# from scipy.spatial import ConvexHull
-# from deepvog3D.draw_ellipse_batch import fit_ellipse_compact
+
 
 class EllipseFitting(threading.Thread):
-    def __init__(self, threads, args, daemon=False, use_queue=True, device ='cpu'):
+    def __init__(self, threads, args, daemon=False, use_queue=True, device="cpu"):
         super().__init__(daemon=daemon)
-        self.name = 'Thread-EllipseFitting'
+        self.name = "Thread-EllipseFitting"
         self.args = args
         self.threads = threads
-        self.use_queue = args.get('is_parallel', use_queue)  #priority to args['is_parallel'] if it exists
-        self.device = args.get('device', device)
-        self.blink_threshold = args.get('blink_threshold', 0.735)
+        # If running the full pipeline in parallel, modules communicate via queues.
+        self.use_queue = args.get("is_parallel", use_queue)
+        self.device = args.get("device", device)
+
+        # Blink threshold uses pupil mask overlap heuristic.
+        self.blink_threshold = args.get("blink_threshold", 0.735)
+
         self.frame_counter = 0
         self.elapsed_time = 0
-        
-        # self.skimg_EllipseModel = measure.EllipseModel()
-    
+
     @staticmethod
     def bwperim_batch(bw, n=4, mask=None):
         """
-        perim = bwperim_torch(bw, n=4, mask=None)
-        Find the perimeter of objects in binary images using PyTorch.
-        A pixel is part of an object perimeter if its value is one and there
-        is at least one zero-valued pixel in its neighborhood.
-        By default the neighborhood of a pixel is 4 nearest pixels, but
-        if `n` is set to 8 the 8 nearest pixels will be considered.
-        
-        Additionally, masks certain regions and boundaries if specified.
-        
-        Parameters
-        ----------
-        bw : A binary image tensor of shape (batch_size, height, width)
-        n : Connectivity. Must be 4 or 8 (default: 4)
-        mask : Optional mask tensor of the same shape as bw to exclude regions
-        Returns
-        -------
-        perim : A boolean tensor of the same shape as bw
+        Perimeter extraction (batch).
+
+        A pixel is perimeter if it is 1 and at least one neighbor (4- or 8-connected)
+        is 0. Uses padding+shifts (GPU-friendly).
+
+        Args:
+            bw: (B,H,W) bool tensor
+            n: 4 or 8 connectivity
+            mask: optional (B,H,W) bool to suppress perimeter pixels (e.g., eyelid mask)
+
+        Returns:
+            perim: (B,H,W) bool tensor
         """
         if n not in (4, 8):
-            raise ValueError('bwperim_torch: n must be 4 or 8')
-        # device = bw.device
-        # batch_size, height, width = bw.shape
-        # Pad the image with zeros on all sides
-        padded_bw = torch.nn.functional.pad(bw, (1, 1, 1, 1), mode='constant', value=0)
-        # Shifting operations
-        north = padded_bw[:, :-2, 1:-1]
-        south = padded_bw[:, 2:, 1:-1]
-        west = padded_bw[:, 1:-1, :-2]
-        east = padded_bw[:, 1:-1, 2:]
-        
-        # Initialize idx with 4-connectivity check
+            raise ValueError("bwperim_batch: n must be 4 or 8")
+
+        padded = torch.nn.functional.pad(bw, (1, 1, 1, 1), mode="constant", value=0)
+
+        north = padded[:, :-2, 1:-1]
+        south = padded[:, 2:, 1:-1]
+        west  = padded[:, 1:-1, :-2]
+        east  = padded[:, 1:-1, 2:]
+
         idx = (north == bw) & (south == bw) & (west == bw) & (east == bw)
+
         if n == 8:
-            north_east = padded_bw[:, :-2, 2:]
-            north_west = padded_bw[:, :-2, :-2]
-            south_east = padded_bw[:, 2:, 2:]
-            south_west = padded_bw[:, 2:, :-2]
-            idx &= (north_east == bw) & (north_west == bw) & (south_east == bw) & (south_west == bw)
-        # The perimeter is the inverse of idx and masked by the original image
-        perim = (~idx) * bw
-        # masking bwperim_output on the img boundaries as 0 
+            ne = padded[:, :-2, 2:]
+            nw = padded[:, :-2, :-2]
+            se = padded[:, 2:, 2:]
+            sw = padded[:, 2:, :-2]
+            idx &= (ne == bw) & (nw == bw) & (se == bw) & (sw == bw)
+
+        perim = (~idx) & bw
+
+        # Remove image boundary to avoid artifacts
         perim[:, 0, :] = False
         perim[:, -1, :] = False
         perim[:, :, 0] = False
         perim[:, :, -1] = False
+
+        if mask is not None:
+            perim = perim & mask
+
         return perim
-    
+
     @staticmethod
     def gen_ellipse_batch_info(perim, device, parallel=False):
-        #TODO: -> can try to implement https://github.com/artuppp/EllipseFitCUDA
-        perim_np = perim.cpu().numpy()   #-> slow down the process
-        batch_size = perim_np.shape[0]
-        # Helper function to process each ellipse
-        def process_single_ellipse(i):
-            vertices = np.column_stack(np.where(perim_np[i]))
-            if vertices.shape[0] > 6:
-                el_info = cv2.fitEllipse(vertices)
-                center = [el_info[0][1], el_info[0][0]]
-                w = el_info[1][0] / 2
-                h = el_info[1][1] / 2
-                radian = np.pi / 2 - np.deg2rad(el_info[2])
-                return center, w, h, radian, True
-            else:
-                return [np.nan, np.nan], np.nan, np.nan, np.nan, False
-        # Parallel or sequential ellipse fitting based on the argument
-        if parallel:   #-> might be faster (depends on the number of ellipses)
-            with ThreadPoolExecutor() as executor:
-                results = list(executor.map(process_single_ellipse, range(batch_size)))
+        """
+        Fit ellipses per image in the batch using OpenCV.
+
+        NOTE: This hops to CPU numpy. This is the slow step.
+
+        Args:
+            perim: (B,H,W) bool tensor
+            device: torch device for output tensors
+            parallel: use ThreadPoolExecutor for per-frame CPU ellipse fits
+
+        Returns:
+            ellipse_info: (center_batch, w_batch, h_batch, radian_batch)
+            is_valid: (B,) bool tensor
+        """
+        perim_np = perim.detach().cpu().numpy()  # (B,H,W)
+        B = perim_np.shape[0]
+
+        def fit_one(i):
+            verts = np.column_stack(np.where(perim_np[i]))
+            if verts.shape[0] > 6:
+                el_info = cv2.fitEllipse(verts)  # (center(x,y), (MA,ma), angle_deg)
+                # Your convention: store center as [x,y] in image coordinates
+                center = [el_info[0][1], el_info[0][0]]  # swap because verts uses (row,col)
+                w = el_info[1][0] / 2.0
+                h = el_info[1][1] / 2.0
+                rad = np.pi / 2 - np.deg2rad(el_info[2])
+                return center, w, h, rad, True
+            return [np.nan, np.nan], np.nan, np.nan, np.nan, False
+
+        if parallel:
+            with ThreadPoolExecutor() as ex:
+                results = list(ex.map(fit_one, range(B)))
         else:
-            results = [process_single_ellipse(i) for i in range(batch_size)]
-        # Unpack results
+            results = [fit_one(i) for i in range(B)]
+
         centers, ws, hs, radians, valids = zip(*results)
 
-        # Convert to tensors
-        center_batch = torch.tensor(centers, dtype=torch.float32, device=device)
-        w_batch = torch.tensor(ws, dtype=torch.float32, device=device)
-        h_batch = torch.tensor(hs, dtype=torch.float32, device=device)
-        radian_batch = torch.tensor(radians, dtype=torch.float32, device=device)
-        is_valid = torch.tensor(valids, dtype=torch.bool, device=device)
+        center_batch  = torch.tensor(centers, dtype=torch.float32, device=device)
+        w_batch       = torch.tensor(ws, dtype=torch.float32, device=device)
+        h_batch       = torch.tensor(hs, dtype=torch.float32, device=device)
+        radian_batch  = torch.tensor(radians, dtype=torch.float32, device=device)
+        is_valid      = torch.tensor(valids, dtype=torch.bool, device=device)
 
         return (center_batch, w_batch, h_batch, radian_batch), is_valid
 
-
     @staticmethod
     def checkEllipse_batch(xx, yy, centers, w, h, theta):
-        x, y = xx.unsqueeze(0) - centers[:, 0].view(-1, 1, 1), yy.unsqueeze(0) - centers[:, 1].view(-1, 1, 1)
-        cos_t, sin_t = torch.cos(theta).view(-1, 1, 1), torch.sin(theta).view(-1, 1, 1)
-        x_rot, y_rot = x * cos_t + y * sin_t, -x * sin_t + y * cos_t
-        return (x_rot / w.view(-1, 1, 1))**2 + (y_rot / h.view(-1, 1, 1))**2
-    
-    @staticmethod
-    def EllipseConfidence_batch(pred, el_info, device):
-        c, w, h, theta = el_info
-        yy, xx = torch.meshgrid(
-            torch.arange(pred.shape[-2], device=device),
-            torch.arange(pred.shape[-1], device=device),
-            indexing='ij'
-        )
-        mask = EllipseFitting.checkEllipse_batch(xx, yy, c, w, h, theta) < 1
-        masked = pred * mask
-        return masked.sum(dim=(-2, -1)) / (mask.sum(dim=(-2, -1)) + 1e-8)
-    
-    
-    @staticmethod
-    def checkEllipse_batch(xx, yy, centers, w, h, theta):
-        x, y = xx.unsqueeze(0) - centers[:, 0].view(-1, 1, 1), yy.unsqueeze(0) - centers[:, 1].view(-1, 1, 1)
-        cos_t, sin_t = torch.cos(theta).view(-1, 1, 1), torch.sin(theta).view(-1, 1, 1)
-        x_rot, y_rot = x * cos_t + y * sin_t, -x * sin_t + y * cos_t
-        return (x_rot / w.view(-1, 1, 1))**2 + (y_rot / h.view(-1, 1, 1))**2
-    
-    @staticmethod
-    def EllipseConfidence_batch(pred, el_info, device):
-        c, w, h, theta = el_info
-        yy, xx = torch.meshgrid(
-            torch.arange(pred.shape[-2], device=device),
-            torch.arange(pred.shape[-1], device=device),
-            indexing='ij'
-        )
-        mask = EllipseFitting.checkEllipse_batch(xx, yy, c, w, h, theta) < 1
-        masked = pred * mask
-        return masked.sum(dim=(-2, -1)) / (mask.sum(dim=(-2, -1)) + 1e-8), mask.bool()
-
-
-    @staticmethod
-    def fit_ellipse_compact(tensor, threshold = 0.5, mask=None):
-        """Fitting an ellipse to the thresholded pixels which form the largest connected area.
-        Args:
-            tensor (3D torch tensor): batch x h x w, Prediction from the DeepVOG network (240, 320), float [0,1]
-            threshold (scalar): thresholding pixels for fitting an ellipse
-            mask (4D torch tensor): Prediction from DeepVOG-3D network for eyelid region (240, 320), float [0,1].
-                                    intended for masking away the eyelid such as the fitting is better
-        Returns:
-            ellipse_info (tuple): A tuple of (center, w, h, radian), center is a list [x-coordinate, y-coordinate] of the ellipse centre. 
-                                    None is returned if no ellipse can be found.
-            confidence (1D torch tensor): Confidence of the fitted ellipse.
-            n_pxls (1D torch tensor): Number of pixels used for fitting the ellipse.
-            is_valid (1D torch tensor): Boolean tensor indicating if the ellipse is valid
         """
-        # isolated_pred = isolate_islands(img, threshold = threshold)
+        Compute ellipse equation value for each pixel, batched.
+
+        Returns:
+            val: (B,H,W) where val < 1 is inside ellipse.
+        """
+        x = xx.unsqueeze(0) - centers[:, 0].view(-1, 1, 1)
+        y = yy.unsqueeze(0) - centers[:, 1].view(-1, 1, 1)
+
+        cos_t = torch.cos(theta).view(-1, 1, 1)
+        sin_t = torch.sin(theta).view(-1, 1, 1)
+
+        xr = x * cos_t + y * sin_t
+        yr = -x * sin_t + y * cos_t
+
+        return (xr / w.view(-1, 1, 1)) ** 2 + (yr / h.view(-1, 1, 1)) ** 2
+
+    @staticmethod
+    def EllipseConfidence_batch(pred, el_info, device):
+        """
+        Confidence = fraction of prediction mass that lies inside the fitted ellipse.
+
+        Args:
+            pred: (B,H,W) float (segmentation probability)
+            el_info: (center, w, h, theta)
+
+        Returns:
+            conf: (B,) float
+            mask: (B,H,W) bool ellipse interior mask
+        """
+        c, w, h, theta = el_info
+
+        yy, xx = torch.meshgrid(
+            torch.arange(pred.shape[-2], device=device),
+            torch.arange(pred.shape[-1], device=device),
+            indexing="ij",
+        )
+
+        mask = EllipseFitting.checkEllipse_batch(xx, yy, c, w, h, theta) < 1
+        masked = pred * mask
+        conf = masked.sum(dim=(-2, -1)) / (mask.sum(dim=(-2, -1)) + 1e-8)
+        return conf, mask.bool()
+
+    @staticmethod
+    def fit_ellipse_compact(tensor, threshold=0.5, mask=None):
+        """
+        Fit ellipse for each batch element.
+
+        Steps:
+        - Threshold prediction -> roi
+        - Perimeter extraction on roi
+        - Optional masking (e.g. remove eyelid)
+        - cv2.fitEllipse on perimeter pixels
+        - Confidence score inside ellipse
+
+        Returns:
+            ellipse_info: (center, w, h, radian)
+            el_masks: (B,H,W) bool ellipse interior mask
+            confidence: (B,) float
+            is_valid: (B,) bool
+        """
         device = tensor.device
         roi = tensor > threshold
-        tensor[~roi] = 0.0   # set the pixels below threshold to 0
-        perim_batch = EllipseFitting.bwperim_batch(roi)   #bust be binary!!
-        # # masking eyelid away from bwperim_output. Currently not available in DeepVOG (But will be used in DeepVOG-3D)
-        if mask is not None:
-            perim_batch[~mask] = False
-        ellipse_info, is_valid = EllipseFitting.gen_ellipse_batch_info(perim_batch, device=device, parallel=False)
-        confidence, el_masks = EllipseFitting.EllipseConfidence_batch(tensor*roi, ellipse_info, device=device)
-        n_pxls = torch.nansum(roi, dim=[-2, -1]).float()
+
+        # Avoid modifying original tensor outside this function
+        pred = tensor * roi
+
+        perim = EllipseFitting.bwperim_batch(roi, mask=mask)
+        ellipse_info, is_valid = EllipseFitting.gen_ellipse_batch_info(perim, device=device, parallel=False)
+
+        confidence, el_masks = EllipseFitting.EllipseConfidence_batch(pred, ellipse_info, device=device)
+
+        n_pxls = roi.sum(dim=(-2, -1)).float()
         is_valid &= (n_pxls != 0)
         return ellipse_info, el_masks, confidence, is_valid
-    
+
     @staticmethod
     def process_region(pred, threshold, label, mask):
-        ellipses, el_masks, confidence, is_valid = EllipseFitting.fit_ellipse_compact(pred, threshold = threshold, mask=mask)
+        """
+        Helper for pupil/iris: fit ellipse and format outputs into a dict of batched tensors.
+        """
+        ellipses, el_masks, confidence, is_valid = EllipseFitting.fit_ellipse_compact(pred, threshold=threshold, mask=mask)
+        center, w, h, rad = ellipses
         return {
-            f'{label}_center_x': ellipses[0][:, 0],
-            f'{label}_center_y': ellipses[0][:, 1],
-            f'{label}_w': ellipses[1],
-            f'{label}_h': ellipses[2],
-            f'{label}_radius': (ellipses[1] + ellipses[2]) / 2,
-            f'{label}_radian': ellipses[3],
-            f'{label}_confidence': confidence,
-            # f'{label}_mask': ,
+            f"{label}_center_x": center[:, 0],
+            f"{label}_center_y": center[:, 1],
+            f"{label}_w": w,
+            f"{label}_h": h,
+            f"{label}_radius": (w + h) / 2,
+            f"{label}_radian": rad,
+            f"{label}_confidence": confidence,
         }, is_valid, el_masks
-    
-    def ellipse_fitting(self, frame_batch):
-        start_time = time.time()
-        self.batch_size = frame_batch['idxs'].shape[0]
-        self.is_valid = frame_batch['is_valid']
-        segs = frame_batch['segs']
-        img_gray = frame_batch['imgs']
-        sclera_masks = (segs[:, :, :, -1] > self.args['threshold_sclera'])
 
-        el_pupil, is_valid_pupil, pupil_masks = EllipseFitting.process_region(segs[:, :, :, 0], self.args['threshold_pupil'], label='pupil', mask = None)
-        el_iris, is_valid_iris, iris_masks = EllipseFitting.process_region(segs[:, :, :, 1], self.args['threshold_iris'], label='iris', mask = sclera_masks)
-        el_dicts = {**el_pupil,**el_iris}
-        self.is_valid &=  (is_valid_pupil != 0) & (is_valid_iris != 0)
+    def ellipse_fitting(self, frame_batch):
+        """
+        Main step:
+        - Fit pupil+iris ellipses.
+        - Compute blink flag and "useful_maps" for torsion.
+        - Dispatch to downstream queues + save ellipse_out/segment_out.
+        """
+        start_time = time.time()
+        self.batch_size = frame_batch["idxs"].shape[0]
+        self.is_valid = frame_batch["is_valid"]
+
+        segs = frame_batch["segs"]      # (B,H,W,C)
+        img_gray = frame_batch["imgs"]  # (B,H,W)
+
+        sclera_masks = (segs[:, :, :, -1] > self.args["threshold_sclera"])
+
+        el_pupil, is_valid_pupil, pupil_masks = EllipseFitting.process_region(
+            segs[:, :, :, 0], self.args["threshold_pupil"], label="pupil", mask=None
+        )
+        el_iris, is_valid_iris, iris_masks = EllipseFitting.process_region(
+            segs[:, :, :, 1], self.args["threshold_iris"], label="iris", mask=sclera_masks
+        )
+
+        el_dicts = {**el_pupil, **el_iris}
+
+        # Final validity combines exposure validity + successful ellipse fits
+        self.is_valid &= (is_valid_pupil != 0) & (is_valid_iris != 0)
         self.frame_counter += self.batch_size
 
-        
-                # seg_mask = (segs[:, :, :, 1] > 0.5) & (segs[:, :, :, 0] < 0.5) & \
-        #         (segs[:, :, :, 3] > 0.5) & (segs[:, :, :, 2] < 0.5)
+        # Iris ring region used for torsion: inside iris ellipse, outside pupil ellipse, and within sclera mask
         seg_mask = (iris_masks & ~pupil_masks & sclera_masks)
-        # seg_mask = (segs[:, :, :, 1] > self.params['threshold_iris']) & (segs[:, :, :, 0] < self.params['threshold_pupil']) & \
-        #          (segs[:, :, :, -1] < self.params['threshold_sclera']) 
+
         useful_maps = torch.zeros_like(img_gray, dtype=torch.float32)
         useful_maps[seg_mask] = img_gray[seg_mask]
-        blink_score = torch.sum(pupil_masks & sclera_masks, dim = [-2,-1])/ torch.sum(pupil_masks, dim = [-2,-1])
+
+        # Blink heuristic: how much pupil mask overlaps sclera mask
+        blink_score = torch.sum(pupil_masks & sclera_masks, dim=[-2, -1]) / (torch.sum(pupil_masks, dim=[-2, -1]) + 1e-8)
         blink_score[~self.is_valid] = torch.nan
         blink = blink_score < self.blink_threshold
 
-        el_dicts['blink'] = blink
-        el_dicts['is_valid'] = self.is_valid
+        el_dicts["blink"] = blink
+        el_dicts["is_valid"] = self.is_valid
 
-        # Outputs
         gaze_batch = {
-            'imgs': img_gray,
-            'is_valid': self.is_valid,
-            'ellipses': el_dicts,
-            'idxs': frame_batch['idxs'],
-            'blink': blink,
-            'iris_masks': iris_masks,
-            'pupil_masks': pupil_masks,
+            "imgs": img_gray,
+            "is_valid": self.is_valid,
+            "ellipses": el_dicts,
+            "idxs": frame_batch["idxs"],
+            "blink": blink,
+            "iris_masks": iris_masks,
+            "pupil_masks": pupil_masks,
         }
         torsion_batch = {
-            'useful_maps': useful_maps,
-            'is_valid': self.is_valid,
-            'ellipses': el_dicts,
-            'idxs': frame_batch['idxs'],
-            'blink': blink
+            "useful_maps": useful_maps,
+            "is_valid": self.is_valid,
+            "ellipses": el_dicts,
+            "idxs": frame_batch["idxs"],
+            "blink": blink,
         }
+
         self.elapsed_time += time.time() - start_time
 
-        # put data on target queue(s)
-        if self.use_queue:
-            if self.args['gaze_tracking_flag']:
-                self.threads['ques']['gaze_tracking'].put(gaze_batch)
-            if self.args['torsion_tracking_flag'] and not(self.args['torsion_geometric_correction_type']=='3D'):
-                self.threads['ques']['torsion_tracking'].put(torsion_batch)
-
-            # el_dicts_cpu = {k: (v.detach().cpu() if isinstance(v, torch.Tensor) else v) for k, v in el_dicts.items()}
-            def to_np(v):
-                if isinstance(v, torch.Tensor):
-                    return v.detach().cpu().numpy()
-                return np.asarray(v)
-
-            # el_dicts is dict of batched tensors/arrays, shape (B,)
-            el_np = {k: to_np(v) for k, v in el_dicts.items()}
-
-            # infer batch size B
-            first = next(iter(el_np.values()))
-            B = int(first.shape[0]) if np.asarray(first).ndim > 0 else 1
-
-            el_list = []
-            for i in range(B):
-                row = {}
-                for k, arr in el_np.items():
-                    a = np.asarray(arr)
-                    if a.ndim == 0:
-                        row[k] = float(a)
-                    else:
-                        vi = a[i]
-                        vi = np.asarray(vi)
-                        row[k] = float(vi.reshape(-1)[0]) if vi.size == 1 else vi
-                el_list.append(row)
-
-            # put list[dict] into queue
-            self.threads['ques']['ellipse_out'].put(el_list)
-                
-            if self.args['seg_video_flag']: 
-                bid = int(frame_batch['idxs'][0])  # or frame_batch.get('batch_id', frame_batch['idxs'][0])
-                if self.args['write_seg_video_type'] == 'raw':
-                    payload = segs.detach().cpu().numpy()
-                elif self.args['write_seg_video_type'] == 'processed':
-                    payload = seg_mask.detach().cpu().numpy()
-                self.threads['ques']['segment_out'].put((bid, payload))
-        else:
+        if not self.use_queue:
             return el_dicts, gaze_batch, torsion_batch
-        
-    
+
+        # -----------------------
+        # Send to downstream stages
+        # -----------------------
+        if self.args["gaze_tracking_flag"]:
+            self.threads["ques"]["gaze_tracking"].put(gaze_batch)
+
+        # For torsion correction type "3D", torsion uses gaze info and is triggered later.
+        if self.args["torsion_tracking_flag"] and (self.args["torsion_geometric_correction_type"] != "3D"):
+            self.threads["ques"]["torsion_tracking"].put(torsion_batch)
+
+        # -----------------------
+        # Save ellipses output (list[dict], one per frame)
+        # -----------------------
+        def to_np(v):
+            if isinstance(v, torch.Tensor):
+                return v.detach().cpu().numpy()
+            return np.asarray(v)
+
+        el_np = {k: to_np(v) for k, v in el_dicts.items()}
+        B = int(next(iter(el_np.values())).shape[0])
+
+        el_list = []
+        for i in range(B):
+            row = {}
+            for k, arr in el_np.items():
+                a = np.asarray(arr)
+                if a.ndim == 0:
+                    row[k] = float(a)
+                else:
+                    vi = np.asarray(a[i])
+                    row[k] = float(vi.reshape(-1)[0]) if vi.size == 1 else vi
+            el_list.append(row)
+
+        self.threads["ques"]["ellipse_out"].put(el_list)
+
+        # -----------------------
+        # Optional seg video payload
+        # -----------------------
+        if self.args["seg_video_flag"]:
+            bid = int(frame_batch["idxs"][0])
+            if self.args["write_seg_video_type"] == "raw":
+                payload = segs.detach().cpu().numpy()
+            elif self.args["write_seg_video_type"] == "processed":
+                payload = seg_mask.detach().cpu().numpy()
+            else:
+                payload = segs.detach().cpu().numpy()
+            self.threads["ques"]["segment_out"].put((bid, payload))
+
     def run(self):
+        """
+        Thread loop:
+        - Consume frame_batch from 'ellipse_fitting'
+        - Run ellipse_fitting()
+        - On None: propagate poison pills to downstream queues
+        """
         while True:
-            # read data from source queue
-            frame_batch = self.threads['ques']['ellipse_fitting'].get()
-            if frame_batch is None: # poison pill
-                self.threads['ques']['ellipse_out'].put(None)
+            frame_batch = self.threads["ques"]["ellipse_fitting"].get()
+            if frame_batch is None:
+                self.threads["ques"]["ellipse_out"].put(None)
+
                 if self.args['seg_video_flag']:
                     self.threads['ques']['segment_out'].put(None)
 

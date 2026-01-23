@@ -1,5 +1,8 @@
 import torch
 import monai
+# Global device
+import torch.nn as nn
+from transformers import SegformerForSemanticSegmentation
 
 def Unet_3in4out_model():
     # input: 4 channels: rgb
@@ -177,66 +180,37 @@ def SegResNetVAE_3in3out_model():
     return model
 
 
-# Global device
-import torch.nn as nn
-from monai.networks.nets import UNet, SegResNet
-import torch
-import torch.nn as nn
-from transformers import SegformerImageProcessor, SegformerForSemanticSegmentation
-from torchvision.transforms import Compose, ToTensor, Normalize, Resize
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 class SegFormerB0_3in3out(nn.Module):
-    def __init__(self, input_size=(240, 320), in_channels=3, out_channels=3):
+    def __init__(self, input_size=(240, 320), out_channels=3, weight_path=None, device="cuda"):
         super().__init__()
-        self.input_size = input_size  # Desired H, W
+        self.input_size = input_size
 
-        # Load pre-trained SegFormer model
-        self.model = SegformerForSemanticSegmentation.from_pretrained(
-            "nvidia/segformer-b0-finetuned-ade-512-512",
-            num_labels=out_channels,
-            ignore_mismatched_sizes=True,
+        # 1) Create base model WITHOUT changing num_labels yet
+        base = SegformerForSemanticSegmentation.from_pretrained(
+            "nvidia/segformer-b0-finetuned-ade-512-512"
         )
-
-        # Override the classifier head (1x1 conv) for correct out_channels
-        self.model.decode_head.classifier = nn.Conv2d(
-            in_channels=self.model.config.decoder_hidden_size,
+        # 2) Replace classifier head to 3 classes
+        base.decode_head.classifier = nn.Conv2d(
+            in_channels=base.config.decoder_hidden_size,
             out_channels=out_channels,
             kernel_size=1,
         )
+        base.config.num_labels = out_channels
+        base.config.image_size = input_size
 
-        # Optional: set expected image size in config (used in interpolation logic)
-        self.model.config.image_size = input_size
+        self.model = base.to(device).eval()
 
-        # Use new SegformerImageProcessor (replaces FeatureExtractor)
-        self.feature_extractor = SegformerImageProcessor(
-            size={"height": input_size[0], "width": input_size[1]},
-            do_normalize=True,
-            do_resize=True,
-        )
-        self.model_name = "SegFormerB0_3in3out"
-        # Placeholder: plug in your actual transform/loss/metrics implementations
-        # self.train_transforms, self.val_transforms = fullSegment_transforms()
-        # self.loss_function = loss_fullSegment
-        # self.metrics = val_fullSegment_metric
-        # self.inferer = SimpleInferer()
+        # 3) Load your trained weights AFTER replacing head
+        if weight_path is not None:
+            sd = torch.load(weight_path, map_location="cpu")
+            missing, unexpected = self.model.load_state_dict(sd, strict=False)
+            print("Loaded weights. Missing:", missing)
+            print("Unexpected:", unexpected)
 
     def forward(self, x):
-        # x shape: (B, 3, H, W) — must be resized to match input_size externally
-        outputs = self.model(pixel_values=x)
-        logits = outputs.logits  # (B, num_classes, H/4, W/4)
-
-        # Upsample to match the desired output size (input_size)
-        logits = nn.functional.interpolate(
-            logits,
-            size=self.input_size,
-            mode="bilinear",
-            align_corners=False,
-        )
-        if self.training:
-            return {"decoder": logits}
-        else:
-            return logits
-
+        out = self.model(pixel_values=x).logits
+        return torch.nn.functional.interpolate(out, size=self.input_size, mode="bilinear", align_corners=False)
+    
     @classmethod
     def read_model(cls, input_size=(240, 320), in_channels=3, out_channels=3, device="cuda"):
         model = cls(input_size=input_size, in_channels=in_channels, out_channels=out_channels)

@@ -6,25 +6,7 @@ import cv2
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
-from matplotlib.patches import Ellipse
-from monai.transforms import Resize
-import skvideo.io as skv
-import kornia.enhance as kornia_enhance
-
 from pye3d.detector_3d import CameraModel, Detector3D, DetectorMode
-# from pupil_detectors import Detector2D
-# from pye3d.refraction import Refractionizer
-
-# from .cpp.refraction_correction import apply_correction_pipeline
-# refractionizer = Refractionizer()
-# print(refractionizer.correct_sphere_center([[0.0, 0.0, 35.0]]))
-# input_features = np.asarray(
-#     [[*self.sphere_center, *pupil_circle.normal, pupil_circle.radius]]
-# )
-# refraction_corrected_params = self.refractionizer.correct_pupil_circle(
-#     input_features
-# )[0]
-
 from ..utils.unprojection import convert_ell_to_general_batch, unprojectGazePositions_batch, reproject, reverse_reproject
 from ..utils.intersection import intersect ,intersect_batch, fit_ransac_batch, fit_ransac_batch_v2, fit_ransac_batch_v3, fit_ransac_batch_v4, fit_ransac_batch_v5, fit_ransac_batch_v6, line_sphere_intersect_batch
 from ..utils.cart2sph import cart2sph_batch_PL, cart2sph_batch

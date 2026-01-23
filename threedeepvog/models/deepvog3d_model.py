@@ -35,6 +35,20 @@ class Gray2Rgb(Transform):
 
 
 class Model_3DeepVOG:
+    """
+    Wrapper class for eye-feature segmentation models used in 3DeepVOG.
+
+    This class:
+    - builds the selected segmentation network (SegResNet / UNet / SegFormer)
+    - loads pretrained weights
+    - moves the model to the correct device
+    - defines preprocessing and postprocessing transforms
+    - provides a unified `predict()` interface
+
+    The model operates on grayscale video frames resized to a fixed
+    processing resolution (default: 240x320).
+    """
+    
     def __init__(self, device="cpu",
                  model=None,
                  ff_model_weights=None,
@@ -42,7 +56,7 @@ class Model_3DeepVOG:
                  video_height=240):
 
         self.device = torch.device(device) if not isinstance(device, torch.device) else device
-
+        base_dir = os.path.dirname(__file__)
         # ---- build model instance ----
         if model is None:
             model = SegResNet_3in3out_model()
@@ -51,15 +65,12 @@ class Model_3DeepVOG:
                 model = Unet_3in4out_model()
             elif model == "SegResNet_3in3out":
                 model = SegResNet_3in3out_model()
+                ff_model_weights = os.path.join(base_dir, "SegResNet_weights.pth")
             elif model == "SegFormerB0_3in3out":
                 model = SegFormerB0_3in3out()
+                ff_model_weights = os.path.join(base_dir, "SegFormer_weights.pth")
             else:
                 raise ValueError(f"Unsupported model type: {model}")
-
-        # ---- load weights ----
-        if ff_model_weights is None:
-            base_dir = os.path.dirname(__file__)
-            ff_model_weights = os.path.join(base_dir, "SegResNet_weights.pth")
 
         state_dict = torch.load(ff_model_weights, map_location="cpu")  # safest
         model.load_state_dict(state_dict)
