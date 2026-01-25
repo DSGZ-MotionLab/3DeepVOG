@@ -7,6 +7,7 @@ import pandas as pd
 import cv2
 import skvideo.io as skv
 import torch
+import glob, os
 
 _STOP = object()
 class DiskWriter(threading.Thread):
@@ -20,29 +21,26 @@ class DiskWriter(threading.Thread):
     - Writing every batch is slow (I/O bound) and can bottleneck the pipeline.
     - Buffering + periodic flush reduces overhead and keeps processing realtime.
     """
-
     def __init__(self, out_dir: Path, flush_every=200, daemon=True):
         super().__init__(daemon=daemon)
-        self.out_dir = Path(out_dir); self.out_dir.mkdir(parents=True, exist_ok=True)
-        self.flush_every = flush_every
+        self.out_dir = Path(out_dir)
+        self.out_dir.mkdir(parents=True, exist_ok=True)
+
+        self.flush_every = int(flush_every)
         self.q = queue.Queue(maxsize=64)
 
         self.ellipse_buf = []
         self.gaze_buf = defaultdict(list)
         self.torsion_buf = []
-        self.ellipse_pkl = self.out_dir / "ellipses.pkl"
-        self.gaze_pkl = self.out_dir / "gaze.pkl"
-        self.torsion_pkl = self.out_dir / "torsion.pkl"
+
+        # chunk counters
+        self.ellipse_i = 0
+        self.gaze_i = 0
+        self.torsion_i = 0
         self.ticks = 0
 
     @staticmethod
     def _atomic_pickle(obj, path: Path):
-        """
-        Write pickle atomically:
-        - write to *.tmp first
-        - replace target file
-        This prevents partially-written/corrupted outputs if process crashes mid-write.
-        """
         tmp = path.with_suffix(path.suffix + ".tmp")
         pd.to_pickle(obj, tmp)
         tmp.replace(path)
@@ -51,28 +49,23 @@ class DiskWriter(threading.Thread):
         self.q.put((kind, payload))
 
     def push_gaze(self, payload: dict):
-        """
-        Buffer gaze outputs.
-
-        payload is a dict of arrays, each shaped (B, ...) where axis 0 is batch.
-        We store per-key chunks so we can concatenate later.
-        """
         for k, v in payload.items():
             if isinstance(v, torch.Tensor):
                 v = v.detach().cpu().numpy()
             self.gaze_buf[k].append(v)
 
     def _flush(self):
-        """Flush all buffered outputs to disk."""
+        # ---- ellipses chunk ----
         if self.ellipse_buf:
             df = pd.concat(self.ellipse_buf, ignore_index=True)
-            self._atomic_pickle(df, self.ellipse_pkl)
+            self.ellipse_i += 1
+            self._atomic_pickle(df, self.out_dir / f"ellipses_{self.ellipse_i:06d}.pkl")
             self.ellipse_buf.clear()
 
+        # ---- gaze chunk ----
         if self.gaze_buf:
             big = {k: np.concatenate(v, axis=0) for k, v in self.gaze_buf.items()}
 
-            # nicer names for specific vector keys
             vec_names = {
                 "c_eye": ("x", "y", "z"),
                 "c_pupil": ("x", "y", "z"),
@@ -92,40 +85,43 @@ class DiskWriter(threading.Thread):
                     names = vec_names.get(k)
                     for j in range(a.shape[1]):
                         suffix = names[j] if names and j < len(names) else str(j)
-                        colname = f"{k}_{suffix}" if (names or suffix.isdigit()) else f"{k}_{j}"
-                        cols[colname] = a[:, j]
+                        cols[f"{k}_{suffix}"] = a[:, j]
                 else:
                     cols[k] = list(a)
-            self._atomic_pickle(pd.DataFrame(cols), self.gaze_pkl)
+
+            self.gaze_i += 1
+            self._atomic_pickle(pd.DataFrame(cols), self.out_dir / f"gaze_{self.gaze_i:06d}.pkl")
             self.gaze_buf.clear()
 
+        # ---- torsion chunk ----
         if self.torsion_buf:
-            self._atomic_pickle(list(self.torsion_buf), self.torsion_pkl)
+            self.torsion_i += 1
+            self._atomic_pickle(list(self.torsion_buf), self.out_dir / f"torsion_{self.torsion_i:06d}.pkl")
             self.torsion_buf.clear()
 
     def run(self):
-        """
-        Thread loop:
-        - Read items from queue until _STOP
-        - Buffer them
-        - Periodically flush
-        """
         while True:
             item = self.q.get()
             if item is _STOP:
                 break
+
             kind, payload = item
 
             if kind == "ellipse":
                 df = payload if isinstance(payload, pd.DataFrame) else pd.DataFrame(payload if isinstance(payload, list) else [payload])
                 self.ellipse_buf.append(df)
+
             elif kind == "gaze":
                 self.push_gaze(payload)
+
             elif kind == "torsion":
                 angles = payload.get("torsion_angles") if isinstance(payload, dict) else payload
-                if isinstance(angles, torch.Tensor): angles = angles.detach().cpu().numpy()
-                if isinstance(angles, np.ndarray): angles = angles.tolist()
-                if not isinstance(angles, list): angles = [float(angles)]
+                if isinstance(angles, torch.Tensor):
+                    angles = angles.detach().cpu().numpy()
+                if isinstance(angles, np.ndarray):
+                    angles = angles.tolist()
+                if not isinstance(angles, list):
+                    angles = [float(angles)]
                 self.torsion_buf.extend(angles)
 
             self.ticks += 1
@@ -432,3 +428,37 @@ class ResultRouter(threading.Thread):
             self.overlay.q.put(_STOP)
         if self.fit_writer:
             self.fit_writer.q.put(_STOP)
+
+
+
+def merge_chunks(save_folder: str, cleanup: bool = True):
+    logdir = str(save_folder)
+
+    ell_files  = sorted(glob.glob(os.path.join(logdir, "ellipses_*.pkl")))
+    gaze_files = sorted(glob.glob(os.path.join(logdir, "gaze_*.pkl")))
+    tor_files  = sorted(glob.glob(os.path.join(logdir, "torsion_*.pkl")))
+
+    # ---- merge ellipses ----
+    if ell_files:
+        ell = pd.concat([pd.read_pickle(p) for p in ell_files], ignore_index=True)
+        ell.to_pickle(os.path.join(logdir, "ellipses.pkl"))
+
+    # ---- merge gaze ----
+    if gaze_files:
+        gaze = pd.concat([pd.read_pickle(p) for p in gaze_files], ignore_index=True)
+        gaze.to_pickle(os.path.join(logdir, "gaze.pkl"))
+
+    # ---- merge torsion ----
+    if tor_files:
+        tors = []
+        for p in tor_files:
+            tors.extend(pd.read_pickle(p))
+        pd.to_pickle(tors, os.path.join(logdir, "torsion.pkl"))
+
+    # ---- cleanup temp chunk files ----
+    if cleanup:
+        for p in ell_files + gaze_files + tor_files:
+            try:
+                os.remove(p)
+            except OSError as e:
+                print(f"Warning: could not delete {p}: {e}")

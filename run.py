@@ -29,15 +29,15 @@ from threedeepvog.main import run_3deepvog
 if __name__ == '__main__':
     args = {
         # 'fit_vid': XXXX,   #comment out: if use pred_vid for fitting eyeball model
-        'pred_vid': r"D:\jzhao\DeepVOG-project\3DeepVOG\sample_video\ES_gaze_320x240_pad.mp4",
-        # 'pred_vid': r"D:\jzhao\DeepVOG-project\datasets\Gaze_EyeSeeCam\dataset2024\ekierig\trial.mp4",
-        # 'is_parallel': True,   #True: multithread, False: single thread (sequential)
+        'pred_vid': r"D:\jzhao\DeepVOG-project\3DeepVOG\sample_video\ES_gaze\ES_gaze_320x240_pad.mp4",
+        # 'pred_vid': r"D:\jzhao\DeepVOG-project\3DeepVOG\sample_video\patient_sample\trial.mp4",
+        # 'is_parallel': True,   #True: multithread, False: single thread (sequential)-> not supported currently
         # 'batch_size': 32,   #batch size for processing frames
         'device': 'cuda',   #comment out: use default device, e.g. 'cuda', 'mps', 'cpu'
         'model_frozen': True,  
         'segmentation_model': 'SegResNet_3in3out',   #e.g. 'SegResNet_3in3out'-> faster / 'SegFormerB0_3in3out' -> better accuracy
         # # 'max_frame': 1000,  # comment out: default is all frames
-        'eyeball_model': 'PL', #simple or LeGrand or PL
+        # 'eyeball_model': 'PL', #only PL (PupiLab) algorithm is supported currently
         'connected_components': 'morph',   #e.g. False / 'morph'-> faster / 'largest'-> better accuracy
         'write_seg_video_type': 'processed',   # e.g. 'processed', 'raw'
         'focal_length': 16.0,  # mm scale: if not provided, will use default value, which may not be accurate

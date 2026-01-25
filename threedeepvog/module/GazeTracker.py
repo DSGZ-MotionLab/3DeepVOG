@@ -7,9 +7,7 @@ import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 from pye3d.detector_3d import CameraModel, Detector3D, DetectorMode
-from ..utils.unprojection import convert_ell_to_general_batch, unprojectGazePositions_batch, reproject, reverse_reproject
-from ..utils.intersection import intersect ,intersect_batch, fit_ransac_batch, fit_ransac_batch_v2, fit_ransac_batch_v3, fit_ransac_batch_v4, fit_ransac_batch_v5, fit_ransac_batch_v6, line_sphere_intersect_batch
-from ..utils.cart2sph import cart2sph_batch_PL, cart2sph_batch
+from ..utils.cart2sph import cart2sph_batch_PL
 from ..utils.read_and_save import save_json
 from ..utils.transformation import PL2normDict_batch, circle2ellipse
 '''
@@ -95,9 +93,7 @@ class GazeTracker(threading.Thread):
         if self.args['mode'] == 'predict':
             eyeball_info = pd.read_json(self.args['eyeball_path'],orient='index').T
             if self.eyeball_model == 'simple' or self.eyeball_model == 'LeGrand':
-                self.c_eye = torch.tensor(eyeball_info.loc[0, ['eye_centre_x', 'eye_centre_y', 'eye_centre_z']].values.reshape(3,1), dtype=self.dtype, device=self.device)
-                self.r_eye = eyeball_info.loc[0, 'aver_eye_radius']
-                self.c_eye2d = reproject(self.c_eye, self.fpx, batch_mode= False)
+                pass
             elif self.eyeball_model == 'PL':
                 self.c_eye = eyeball_info.loc[0, ['eye_centre_x', 'eye_centre_y', 'eye_centre_z']].values
                 self.r_eye = eyeball_info.loc[0, 'aver_eye_radius']
@@ -156,149 +152,6 @@ class GazeTracker(threading.Thread):
         return iris_proj_mask.astype(bool)
     
     
-    def unproject_batch_observation(self, el_use, valid_ix): 
-        # Convert centre coordinates from numpy indexing frame to camera frames
-        # circularity = ellipses['pupil_w']/ellipses['pupil_h']
-        el_use['center_x'][~valid_ix] = torch.nan
-        el_use['center_y'][~valid_ix] = torch.nan
-        el_use['w'][~valid_ix] = torch.nan
-        el_use['h'][~valid_ix] = torch.nan
-        el_use['radian'][~valid_ix] = torch.nan
-
-        #TODO: should be float 64 in ellipse fitting class
-        centre = torch.vstack([el_use['center_x'], el_use['center_y']]).to(self.dtype)
-        w, h, radian = el_use['w'].to(self.dtype), el_use['h'].to(self.dtype), el_use['radian'].to(self.dtype)
-        centre_cam = centre.clone()
-        centre_cam[0] = centre_cam[0] - self.img_shape[0]/2
-        centre_cam[1] = centre_cam[1] - self.img_shape[1]/2
-        # Convert ellipse parameters to the coefficients of the general form of ellipse equation
-        A,B,C,D,E,F = convert_ell_to_general_batch(centre_cam[0],centre_cam[1], w, h, radian)
-        ell_co = (A,B,C,D,E,F)
-
-        # Unproject the ellipse to obtain 2 ambiguous gaze vectors with numpy shape (3,1),
-        # and pupil_centre with numpy shape (3,1)
-        unproj_gaze_pos, unproj_gaze_neg , unproj_pupil_centre_pos, unproj_pupil_centre_neg = unprojectGazePositions_batch(self.vertex, ell_co, self.r_pupil_default, valid_ix)
-        unproj_gaze_pos = self.norm_vec_batch(unproj_gaze_pos)
-        unproj_gaze_neg = self.norm_vec_batch(unproj_gaze_neg)
-        
-        return unproj_gaze_pos, unproj_gaze_neg, unproj_pupil_centre_pos, unproj_pupil_centre_neg, centre.T
-    
-
-    #based on information theory, the more data you have, the more accurate the model will be
-    def fit_projected_eye_centre(self, ransac = False, max_iters = 1000, min_distance = 2000):
-    # You will need to determine when to fit outside of the class
-        if (self.gazes_unproj is None) or (self.el_centres is None):
-            raise TypeError('No unprojected gaze lines or ellipse centres were added (not yet initalized). Use add_to_fitting() function to add them first.')
-
-        # self.unprojected_3D_pupil_positions is more noisy
-        a = torch.vstack((self.el_centres,self.el_centres))  
-        # a = torch.vstack([self.unprojected_3D_pupil_positions[:,0,0:2], self.unprojected_3D_pupil_positions[:,0,0:2]])
-        n = torch.vstack((self.gazes_unproj[:,0,0:2], self.gazes_unproj[:,1,0:2]))
-        if ransac == True:
-            abnormality_check = self.el_centres.shape[0]
-            samples_to_fit = int(a.shape[0]/8)    #quater of survived samples for each minibatch fitting
-            weights = self.el_confs.to(torch.float64)
-            w = torch.sigmoid(5*(weights - torch.median(weights)))
-            w = torch.hstack([w,w])
-            # self.proj_eye_centre, self.fit_residual = fit_ransac_batch_v5(a,n, batch_size = max_iters, sample_size = samples_to_fit, prior_weight = 0.1, weights = w)
-            self.c_eye2d = fit_ransac_batch_v6(a,n, batch_size = max_iters, sample_size = samples_to_fit) 
-            self.fit_residual = 0
-
-        if ransac == False: # or self.eyeball_model == 'LeGrand':
-            self.c_eye2d = intersect_batch(a.unsqueeze(0), n.unsqueeze(0), device=self.device)
-        if (self.c_eye2d is None):
-            raise TypeError('You did not fit a eyeball model.')
-        if abnormality_check != self.el_centres.shape[0]:
-            print("GPU overloading detected. You should reduce the number of samples to fit.")
-        return self.c_eye2d
-
-    def fit_LeGrands_eye_centre(self, ransac = False, c_tilde = None):
-        # matrix = sum_aux_3d[:3, :3]
-            # You will need to determine when to fit outside of the class
-        if (self.gazes_selected is None) or (self.selected_pupil_positions is None):
-            raise TypeError('No unprojected gaze lines or ellipse centres were added (not yet initalized). Use add_to_fitting() function to add them first.')
-        a = self.selected_pupil_positions - torch.tensor(self.pupil_dist)*self.gazes_selected   #/self.mm2px    #dn
-        n = self.norm_vec_batch(self.selected_pupil_positions)  #q  
-        # Normalisation of the 2D projection of gaze vectors is done inside intersect()
-        if ransac == True:
-            max_iters = 10000
-            samples_to_fit = int(a.shape[0]/10) 
-            self.c_eye = fit_ransac_batch_v6(a, n, batch_size = max_iters, sample_size = samples_to_fit)
-            if c_tilde is not None:
-                eye_centre_z = torch.mm(c_tilde.T, self.c_eye/torch.mm(c_tilde.T, c_tilde)).item()
-                self.c_eye = eye_centre_z * c_tilde
-        else:
-            self.c_eye = intersect_batch(a.unsqueeze(0), n.unsqueeze(0), device=self.device)
-        if (self.c_eye is None):
-            raise TypeError('You did not fit a eyeball model.')
-        # intersect_batch(a[5000:8000:200,:].unsqueeze(0), n[5000:8000:200,:].unsqueeze(0), device=self.device)/self.mm2px
-        # self._corrected_sphere_center = self.refractionizer.correct_sphere_center(
-        #     np.asarray([[*self.sphere_center]])
-        # )[0]
-        return self.c_eye
-
-    def estimate_eye_sphere(self):
-        # This function is called once after fit_projected_eye_centre()
-        # self.initial_eye_z is required (in pixel unit)
-        # self.initial_eye_z shall be the z-distance between the point and camera vertex (in camera frame)
-        if (self.c_eye2d is None):
-            # pdb.set_trace()
-            raise TypeError('Projected_eye_centre must be initialized first')
-    
-        # Unprojecting the 2D projected eye centre to 3D.
-        # Converting the projected_eye_centre from numpy indexing frame to camera frame
-        proj_eye_centre_camera_frame = self.c_eye2d.clone()
-        proj_eye_centre_camera_frame[0] = proj_eye_centre_camera_frame[0] - self.img_shape[0]/2
-        proj_eye_centre_camera_frame[1] = proj_eye_centre_camera_frame[1] - self.img_shape[1]/2
-        
-        # Reconstructed selected gaze vectors and pupil positions by rejecting those pointing away from projected eyecentre
-        gazes = [self.gazes_unproj[:,0,:], self.gazes_unproj[:,1,:]]
-        positions = [self.c_pupil_unproj[:,0,:], self.c_pupil_unproj[:,1,:]]
-        selected_gazes, selected_positions = self.disambiguate_dierkes_lines_batch(gazes, positions, proj_eye_centre_camera_frame)   
-        self.gazes_selected, self.selected_pupil_positions = selected_gazes, selected_positions
-
-        if self.eyeball_model == 'simple':
-        # Unprojection: Nearest intersection of two lines. 
-        # a = [eye_centre, pupil_3Dcentre], n =[gaze_vector, pupil_3D_centre]
-            proj_eye_centre_camera_frame_scaled = \
-                reverse_reproject(proj_eye_centre_camera_frame, self.default_eye_z, self.fpx)  #camera coord
-            eye_centre_camera_frame = torch.cat(
-                [proj_eye_centre_camera_frame_scaled.flatten(), 
-                torch.tensor([self.default_eye_z], device=self.device, dtype=self.dtype)]
-            ).view(3, 1)
-
-            eye_centre_camera_frame_expanded = eye_centre_camera_frame.T.unsqueeze(0).repeat(selected_positions.shape[0], 1, 1)  # Shape [668, 1, 3]
-            selected_positions_expanded = selected_positions.unsqueeze(1)  # Shape [668, 1, 3]
-            a_3Dfitting_batch = torch.cat((eye_centre_camera_frame_expanded, selected_positions_expanded), dim=1)  # Shape [668, 2, 3]
-            n_3Dfitting_batch = torch.cat((selected_gazes.unsqueeze(1), selected_positions_expanded), dim=1)  # Shape [668, 2, 3]
-            # self.aver_eye_radius, radius_counter = fit_eyeball_radius_batch(a_3Dfitting_batch, n_3Dfitting_batch, eye_centre_camera_frame)
-            intersected_pupil_3D_centre_batch = intersect_batch(a_3Dfitting_batch, n_3Dfitting_batch) 
-            radius_batch = torch.linalg.norm(intersected_pupil_3D_centre_batch - eye_centre_camera_frame.unsqueeze(0), dim=1)  # Shape [668, 3]
-            radius_counter = radius_batch.shape[0]
-            self.r_eye = torch.mean(radius_batch.squeeze()).item()    #*self.re2dp
-            self.c_eye = eye_centre_camera_frame.cpu().numpy()
-
-            eye_z = ((self.default_eye_z*self.pupil_dist)/self.r_eye)
-            self.r_eye = self.pupil_dist
-            unproj_xy_coord = \
-                reverse_reproject(proj_eye_centre_camera_frame, eye_z, self.fpx)  #camera coord
-            
-            self.c_eye = torch.cat(
-                [unproj_xy_coord.flatten(), 
-                torch.tensor([eye_z], device=self.device, dtype=self.dtype)]
-            ).view(3, 1).cpu().numpy()
-
-
-        elif self.eyeball_model == 'LeGrand':   #use algortihm from Dirkes, but not staible
-            # worst_distance = np.linalg.norm(self.params['resolution'])   #3 * num_frames_fit
-            # harmonious_eye_centre = eye_centre_camera_frame/self.default_eye_z
-            # self.eye_centre = self.fit_LeGrands_eye_centre(ransac=True, c_tilde = harmonious_eye_centre) 
-            self.c_eye = self.fit_LeGrands_eye_centre(ransac=True) 
-            self.r_eye = self.pupil_dist
-            radius_counter = 1
-        return self.r_eye, radius_counter
-    
-    
     def save_eyeball_model(self):
         if (self.c_eye is None) or (self.r_eye is None):
             print("3D eyeball model not found")
@@ -318,55 +171,7 @@ class GazeTracker(threading.Thread):
 
         save_json(self.args['eyeball_path'], save_dict)
         print(f"Save eyeball model to {self.args['eyeball_path']}")
-
-    def disambiguate_dierkes_lines_batch(self, gazes, positions, projected_centre):
-    # gazes is a list ~ [gaze_vector_pos~(3,1), gaze_vector_neg~(3,1)]  (n^+ and n^-)
-    # positions is a list ~ [pupil_position_pos~(3,1), pupil_position_neg~(3,1)] (p^+ and p^-)
-    # projected_centre ~ numpy array~(2,1) (c)
-    # Disambiguaion of the gaze vectors and pupil positions  -- EQ(8) Lech Swirski et al. 2013
-        selected_gaze = gazes[0]
-        selected_position = positions[0]
-        # projected_gaze = reproject(selected_position + selected_gaze, self.focal_length, batch_mode= True) - projected_centre.T   #why this definition? n^~ = (p^~ + n^~) - c^~
-        projected_gaze = reproject(selected_gaze, self.fpx, batch_mode= True)
-        projected_position = reproject(selected_position, self.fpx, batch_mode= True)  #p^~
-        dot_products = torch.sum(projected_gaze * (projected_position - projected_centre.T), dim=1)
-        flip_ix = dot_products < 0    #n^~*(p^~ - c^~) > 0 -> select p+, n+, else select p-, n-
-        selected_gaze[flip_ix] = gazes[1][flip_ix,:]
-        selected_position[flip_ix] = positions[1][flip_ix,:]
-        return selected_gaze, selected_position
         
-    def calc_3Dpupil_info_batch(self):
-        # This function must be called after using unproject_single_observation() to update surrent observation
-        if (self.c_eye is None) or (self.r_eye is None):
-            raise TypeError("Call estimate_eye_sphere() to initialize eye_centre and eye_radius first.")
-        else:
-            selected_gaze_batch, selected_position_batch = \
-                  self.disambiguate_dierkes_lines_batch([self.current_pos_gazes, self.current_neg_gazes], 
-                                                        [self.current_pupil_pos_centres, self.current_pupil_neg_centres],
-                                                        self.c_eye2d)
-            o = torch.zeros((3,1), dtype=self.dtype, device=self.device)
-            consistence = torch.ones(self.batch_size, dtype=torch.bool)
-
-            d1, d2, invalid_mask = line_sphere_intersect_batch(self.c_eye, 
-                                                               torch.tensor(self.r_eye), 
-                                                               o, 
-                                                               self.norm_vec_batch(selected_position_batch))
-            
-            new_pos_min = o.T + torch.min(d1,d2)*self.norm_vec_batch(selected_position_batch)
-            # new_pos_max = o.T + torch.max(d1,d2)*self.norm_vec_batch(selected_position_batch)
-            new_radius_min = (self.r_pupil_default/selected_position_batch[:,-1])*new_pos_min[:,-1]
-            # new_radius_max = (self.defult_pupil_radius/selected_position_batch[:,-1])*new_pos_max[:,-1]
-            new_gaze_min = self.norm_vec_batch(new_pos_min - self.c_eye.T)
-            # new_gaze_max = self.norm_vec_batch(new_pos_max - self.eye_centre.T)
-
-            # print("Cannot find line-sphere interception. Old pupil parameters are used.")
-            new_pos_min[invalid_mask] = selected_position_batch[invalid_mask]
-            new_gaze_min[invalid_mask] = selected_gaze_batch[invalid_mask]
-            new_radius_min[invalid_mask] = self.r_pupil_default
-            consistence[invalid_mask] = False
-            return new_pos_min, new_gaze_min, new_radius_min, consistence
-            # return [new_pos_min, new_pos_max], [new_gaze_min, new_gaze_max], [new_radius_min, new_radius_max], consistence
-
 
     def batch_fitting(self, frame_batch, mask=None): 
         time00 = time.time()
@@ -407,38 +212,11 @@ class GazeTracker(threading.Thread):
                                     self.threads['ques']['feedback'].put(True)
                                     self.early_stop = True
 
-                                # #debugging
-                                # plt.imshow(grayscale_array_batch_np[ix], alpha=0.5)
-                                # plt.imshow(model_iris_mask.astype(float), alpha=0.5, cmap='gray')
-                                # plt.imshow(pred_iris_masks[ix].astype(float), alpha=0.5, cmap='gray')
-                                # plt.savefig("debug_output.png")  # Save to file instead of showing
-
                             if (self.early_stop == False) and (frame_batch['idxs'][ix]==self.frozen_max_frame-1):
                                 print(f"Eyeball fitting is not converged. Best dice: {self.best_dice}")
     
         elif self.eyeball_model == 'simple' or self.eyeball_model == 'LeGrand':
-            circularity = el_use['w']/el_use['h']
-            mask = frame_batch['is_valid'] & ~frame_batch['blink'] &\
-                (el_use['confidence'] > self.confidence_fitting_threshold) & \
-                (circularity < self.circularity_max) & (circularity > self.circularity_min) \
-
-            if not(all(~mask)):
-                #This is all camera centered)
-                self.current_pos_gazes, self.current_neg_gazes,\
-                self.current_pupil_pos_centres, self.current_pupil_neg_centres,\
-                self.ellipse_batch_centres = self.unproject_batch_observation(el_use, mask)
-
-                if (len(self.gazes_unproj)==0) or (len(self.c_pupil_unproj) ==0) or (self.el_centres is None):
-                    self.el_confs = el_use['confidence'][mask]
-                    self.gazes_unproj = torch.stack([self.current_pos_gazes[mask], self.current_neg_gazes[mask]], dim=1)
-                    self.c_pupil_unproj = torch.stack([self.current_pupil_pos_centres[mask], self.current_pupil_neg_centres[mask]], dim=1)
-                    self.el_centres = self.ellipse_batch_centres[mask]
-                else:
-                    self.el_confs = torch.hstack([self.el_confs, el_use['confidence'][mask]])
-                    self.gazes_unproj = torch.vstack([self.gazes_unproj, torch.stack([self.current_pos_gazes[mask], self.current_neg_gazes[mask]], dim=1)])
-                    self.c_pupil_unproj = torch.vstack([self.c_pupil_unproj, torch.stack([self.current_pupil_pos_centres[mask], self.current_pupil_neg_centres[mask]], dim=1)])
-                    self.el_centres = torch.vstack([self.el_centres, self.ellipse_batch_centres[mask]])
-
+            pass
         self.frame_counter = self.frame_counter + self.batch_size 
         time01 = time.time()
         self.elapsed_time += (time01 - time00) 
@@ -446,9 +224,7 @@ class GazeTracker(threading.Thread):
         if (self.frame_counter == self.args['vid_nr_frames']-1) or self.early_stop:
             time00 = time.time()
             if (self.eyeball_model == 'simple') or (self.eyeball_model == 'LeGrand'):
-                worst_dist = np.linalg.norm(self.args['resolution'])
-                self.fit_projected_eye_centre(ransac=True, max_iters=self.args['max_eyeball_param_opt_iters'], min_distance= worst_dist)
-                self.estimate_eye_sphere()
+                pass
             self.save_eyeball_model()
             time01 = time.time()
             self.elapsed_time += (time01 - time00) 
@@ -461,37 +237,8 @@ class GazeTracker(threading.Thread):
         el_use = {key: frame_batch['ellipses'][f"{self.el_use}_{key}"] for key in ["center_x", "center_y", "w", "h", "radian", "confidence"]}
 
         if self.eyeball_model == 'simple' or self.eyeball_model == 'LeGrand':
-            mask = frame_batch['is_valid']
-            # self.use = "pupil" or "iris"
-            if not(all(~mask)):
-                self.current_pos_gazes, self.current_neg_gazes,\
-                self.current_pupil_pos_centres,self.current_pupil_neg_centres,\
-                _ = self.unproject_batch_observation(el_use, mask)
-                p_batch, n_batch, pupil_radius_batch, consistence_batch = self.calc_3Dpupil_info_batch()
-                theta_batch, phi_batch = cart2sph_batch(n_batch)  
-                p_batch = p_batch.cpu().numpy()
-                n_batch = n_batch.cpu().numpy()
-                gaze_batch = {
-                    "hor": theta_batch.cpu().numpy(),
-                    "ver": phi_batch.cpu().numpy(),
-                    "c_pupil": p_batch,   # Bx3
-                    "gaze": n_batch,   # Bx3
-                    "confidence": el_use['confidence'].cpu().numpy(),
-                    "consistence": consistence_batch.cpu().numpy(),
-                    "r_pupil": pupil_radius_batch.cpu().numpy()
-                }
-            else: 
-                gaze_batch = {
-                    "hor": np.zeros(self.batch_size),
-                    "ver": np.zeros(self.batch_size),
-                    "c_pupil": np.zeros(self.batch_size,3),
-                    "gaze": np.zeros(self.batch_size,3),
-                    "confidence": np.zeros(self.batch_size),
-                    "consistence": np.zeros(self.batch_size),
-                    "r_pupil": np.zeros(self.batch_size)
-                }
-            self.frame_counter = self.frame_counter + self.batch_size 
-            
+            pass
+
         elif self.eyeball_model == 'PL':
             # Convert to grayscale and scale on CPU
             frames_np = (frame_batch['imgs'].cpu().numpy()*255).astype(np.uint8)  # Convert to byte (uint8), required by pupilab function
@@ -543,7 +290,6 @@ class GazeTracker(threading.Thread):
                 self.frame_counter += 1
             gaze_batch = PL2normDict_batch(results_3d)
             gaze_batch['hor'], gaze_batch['ver'] = cart2sph_batch_PL(gaze_batch['gaze'])
-            self.threads['ques']['gaze_out'].put(gaze_batch)
         time01 = time.time()
         self.elapsed_time += (time01 - time00) 
         # frame_batch['gaze_out'] = gaze_batch

@@ -67,7 +67,7 @@ from .module.EllipseFitting import EllipseFitting
 from .module.GazeTracker import GazeTracker
 from .module.TorsionTracker import TorsionTracker
 from .module.ParamsRender import ParamsRender
-from .module.ResultCollector import DiskWriter, OverlayWriter, FitVideoWriter, ResultRouter
+from .module.ResultCollector import DiskWriter, OverlayWriter, FitVideoWriter, ResultRouter, merge_chunks
 # from .module.VideoWriter import FitVideoWriter
 # from fast_deepvog3D.validation.SegmentationAnalyzer import SegmentationAnalyzer
 
@@ -319,6 +319,7 @@ def main(args):
     if overlay: overlay.join()
     if fit_writer: fit_writer.join()
 
+    merge_chunks(args["save_folder"], cleanup=True)    
     t01 = time.time()
     print(f"Elapsed time total: {t01 - t00:0.2f} sec. (avg/frame: {(t01 - t00) / args['max_frame']:0.3f} sec = {args['max_frame'] / (t01 - t00):0.2f} fps.)")
     args['elapse_fps']['total'] = args['max_frame'] / (t01 - t00)
