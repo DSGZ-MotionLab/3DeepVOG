@@ -1,10 +1,24 @@
-# 3DeepVOG (In preparation) 
+# 3DeepVOG (v2.0.0)
 
-**Deep learning-based 3D monocular eye tracking (horizontal, vertical, torsional)**  
-Accurate, real-time open-source eye movement analysis for clinical and research applications.
+**3DeepVOG** is an open-source deep learning framework for **real-time 3D monocular eye tracking**, estimating **horizontal, vertical, and torsional eye movements** from standard video-oculography (VOG) recordings.
 
----
+The system is designed for **clinical and research applications**, providing accurate and robust eye-movement quantification under diverse imaging conditions.
 ![Gaze demo](gaze_combined_with_3Deye.gif)
+---
+
+## 📄 Paper
+
+**3DeepVOG: An Open-Source Framework for Real-Time, Accurate 3D Gaze Tracking with Deep Learning**  
+*Digital Biomarkers*, 2025  (https://doi.org/10.1159/000549948)
+
+### Citation
+Zhao J, Ahmadi S-A, Decker J, Möhwald K, zu Eulenburg P, Zwergal A,
+Flanagin VL, Wuehr M.
+3DeepVOG: An Open-Source Framework for Real-Time, Accurate 3D Gaze
+Tracking with Deep Learning.
+Digital Biomarkers. 2025.
+https://doi.org/10.1159/000549948
+
 
 ## Paper Abstract
 
@@ -20,49 +34,78 @@ Accurate, real-time open-source eye movement analysis for clinical and research 
 
 ## Features
 
-✅ 3D gaze estimation: horizontal, vertical, torsional  
-✅ Deep learning-based segmentation of pupil & iris  
-✅ Real-time processing (>300 fps)  
-✅ Robust to low-light & noisy video  
-✅ Validated against the clinical gold-standard VOG system  
-✅ Open-source & extensible  
+- 3D gaze estimation: horizontal, vertical, torsional  
+- Deep learning-based segmentation of pupil & iris  
+- Real-time processing (>300 fps)  
+- Robust to low-light & noisy video  
+- Validated against the clinical gold-standard VOG system  
+- Open-source & extensible  
 
 ---
 
-## System Requirements
+## ⚠️ Current Status
 
-- **Python 3.11**
-- **PyTorch**
-- **MONAI**
-- **OpenCV**
-- **scikit-image**
-- **Kornia**
-- **pye3d**
-- Tested on:  
-  - GPU: **NVIDIA GeForce RTX 4090**  
-  - CPU: **AMD Ryzen 9 7950X3D**  
-  - OS: Windows / Linux  
-
----
+- Actively under development
+- No user-friendly CLI or GUI yet (script-based usage)
+- Tested on:
+  - GPU (NVIDIA GeForce RTX 4090)
+  - CPU (AMD Ryzen 9 7950X3D)
+- Apple Silicon (MPS) not tested
+- Developed and tested on Windows 11
+- Python version: 3.11
+- OS: Windows / Linux
 
 ## Installation
-
 ```bash
 git clone https://github.com/DSGZ-MotionLab/3DeepVOG.git
-
 cd 3DeepVOG
-# create environment (example using conda)
-conda create -n 3deepvog python=3.11
-conda activate 3deepvog
-# install dependencies
+
+# (optional but recommended) create a virtual environment
+python -m venv venv
+venv\Scripts\activate
+pip install --upgrade pip
 pip install -r requirements.txt
 ```
+All dependencies are listed in requirements.txt.
 
-## Example usage
+## How to Run
+Currently, the system is configured via script editing.
+1) Open run.py
+2) Modify the args dictionary:
 ```bash
-python run_demo.py --input_video myvideo.mp4 --output_dir results/
+args["pred_vid"] = "path/to/your/video.mp4"  # monocular VOG video
+args["device"] = "cuda"  # or "cpu" if GPU is not available
 ```
+Optional Calibration: If you have a separate calibration video recorded from the same subject and session (with large eye movements), specify:
+```bash
+args["fit_vid"] = "path/to/calibration_video.mp4"
+```
+This typically improves eyeball fitting and gaze estimation accuracy.
 
+## Camera Parameters
+	•	Using known camera intrinsics (focal length, sensor size) is strongly recommended
+	•	Incorrect camera parameters may lead to:
+	•	Wrong eyeball center estimation
+	•	Failure of corneal refraction correction in pye3d
+	•	Manual tuning of focal length may be required if intrinsics are unknown
+
+## Analysis Options
+gaze_tracking_flag     # estimate horizontal & vertical gaze
+torsion_tracking_flag  # estimate torsional eye movements
+seg_video_flag         # visualize segmentation video
+fit_video_flag         # visualize eyeball fitting (slower)
+
+## Output Structure
+```bash
+log/
+├── fit/
+│   ├── ellipse.pkl
+│   └── model_params.json
+└── predict/
+    ├── ellipse.pkl
+    └── model_params.json
+```
+    
 ## License
 This project is licensed under the Apache License Version 2.0.
 
@@ -70,7 +113,6 @@ This project is licensed under the Apache License Version 2.0.
 Developed at LMU Klinikum
 Clinical Open Research Engine (CORE)
 Supported by the German Space Agency (DLR) on behalf of the Federal Ministry of Economics and Technology/Energy (50WB2236) and by the German Federal Ministry of Education and Research (13GW0490B).
-
 
 ## Contact
 For questions or collaborations:
