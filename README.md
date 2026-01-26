@@ -1,12 +1,11 @@
 # 3DeepVOG (v2.0.0)
 
-**3DeepVOG** is an open-source deep learning framework for **real-time 3D monocular eye tracking**, estimating **horizontal, vertical, and torsional eye movements** from standard video-oculography (VOG) recordings.
+**3DeepVOG** is an open-source deep learning framework for real-time 3D monocular eye tracking, estimating horizontal, vertical, and torsional eye movements from standard video-oculography (VOG) recordings. The system is designed for clinical and research applications, providing accurate and robust eye-movement quantification under diverse imaging conditions.
 
-The system is designed for **clinical and research applications**, providing accurate and robust eye-movement quantification under diverse imaging conditions.
 ![Gaze demo](gaze_combined_with_3Deye.gif)
 ---
 
-## 📄 Paper
+## Paper
 
 **3DeepVOG: An Open-Source Framework for Real-Time, Accurate 3D Gaze Tracking with Deep Learning**  
 *Digital Biomarkers*, 2025  (https://doi.org/10.1159/000549948)
@@ -43,7 +42,7 @@ https://doi.org/10.1159/000549948
 
 ---
 
-## ⚠️ Current Status
+## Current Status
 
 - Actively under development
 - No user-friendly CLI or GUI yet (script-based usage)
@@ -83,17 +82,17 @@ args["fit_vid"] = "path/to/calibration_video.mp4"
 This typically improves eyeball fitting and gaze estimation accuracy.
 
 ## Camera Parameters
-	•	Using known camera intrinsics (focal length, sensor size) is strongly recommended
-	•	Incorrect camera parameters may lead to:
-	•	Wrong eyeball center estimation
-	•	Failure of corneal refraction correction in pye3d
-	•	Manual tuning of focal length may be required if intrinsics are unknown
+- Using known camera intrinsics (focal length, sensor size) is strongly recommended
+- Incorrect camera parameters may lead to:
+- Wrong eyeball center estimation
+- Failure of corneal refraction correction in pye3d
+- Manual tuning of focal length may be required if intrinsics are unknown
 
 ## Analysis Options
-gaze_tracking_flag     # estimate horizontal & vertical gaze
-torsion_tracking_flag  # estimate torsional eye movements
-seg_video_flag         # visualize segmentation video
-fit_video_flag         # visualize eyeball fitting (slower)
+- gaze_tracking_flag     # estimate horizontal & vertical gaze
+- torsion_tracking_flag  # estimate torsional eye movements
+- seg_video_flag         # visualize segmentation video
+- fit_video_flag         # visualize eyeball fitting (slower)
 
 ## Output Structure
 ```bash
@@ -103,8 +102,11 @@ log/
 │   └── model_params.json
 └── predict/
     ├── ellipse.pkl
+    ├── gaze.pkl
+    ├── torsion.pkl
     └── model_params.json
 ```
+You can see how to analyze the processed data (extract gaze information and visualization) under: data_analysis_test.ipynb
     
 ## License
 This project is licensed under the Apache License Version 2.0.
