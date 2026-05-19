@@ -8,14 +8,14 @@
 ## Paper
 
 **3DeepVOG: An Open-Source Framework for Real-Time, Accurate 3D Gaze Tracking with Deep Learning**  
-*Digital Biomarkers*, 2025  (https://doi.org/10.1159/000549948)
+*Digital Biomarkers*, 2026  (https://doi.org/10.1159/000549948)
 
 ### Citation
 Zhao J, Ahmadi S-A, Decker J, Möhwald K, zu Eulenburg P, Zwergal A,
 Flanagin VL, Wuehr M.
 3DeepVOG: An Open-Source Framework for Real-Time, Accurate 3D Gaze
 Tracking with Deep Learning.
-Digital Biomarkers. 2025.
+Digital Biomarkers. 2026.
 https://doi.org/10.1159/000549948
 
 
